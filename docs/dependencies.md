@@ -120,7 +120,7 @@ and a project with no `scad.toml` resolves exactly as OpenSCAD does.
 Every host does this: the command line's exports and `neoscad check`,
 `measure`, `snapshot`, `test` and `docs --in`; `neoscad serve` and the
 command line through it; the MCP server (`neoscad mcp`, which also makes
-the store readable, as it does every library directory); the language
+the store's checkouts readable, as it does every library directory); the language
 server (`neoscad lsp`, so completion, hover and go-to-definition reach
 into dependencies); and the macOS, Windows and Linux apps. Hosts find the project
 (`scad_deps::search::project_for`, a few small reads and no git), turn
@@ -130,8 +130,9 @@ that to the session through `session::Config::project`; the library
 crates never look for a project themselves. The web demo has no disk and is unchanged: its
 library path is what the page provides.
 
-The session's parse cache keys a main file's parse by its library path
-and a stamp of the project's links, so a warm session (`serve`, the MCP
+The session's parse cache keys a main file's parse, and each `use`d
+library's, by the library path and a stamp of the project's links, so a
+warm session (`serve`, the MCP
 server, an editor) follows a `neoscad fetch` or `update` at once.
 
 ## Diagnostics
@@ -189,8 +190,13 @@ prints it). The choices behind it:
   the second does no git work for what the first fetched.
 - **Index and gc**: each fetch records which checkouts and mirrors the
   project links; `neoscad store gc` removes what no live project lists.
-- **Links**: symbolic links, and on Windows a directory junction (no
-  privilege needed) where symbolic links are not allowed, else a copy.
+- **Links**: symbolic links, and on Windows a copy where symbolic links
+  are not allowed (no Developer Mode). A junction would need no
+  privilege, but making one takes `cmd /C mklink /J`, whose command line
+  a folder name could extend, or unsafe Win32 calls. A fetch replaces
+  and removes only links and the copies it made (they hold a
+  `.scad-deps-copy` marker), never another directory in
+  `.scad/libraries`.
 - **Names**: the variables are tool-neutral (`SCAD_STORE`, `SCAD_GIT`),
   so that any tool implementing the format can share one store; the
   first names, `NEOSCAD_STORE` and `NEOSCAD_GIT`, still work as aliases
@@ -201,12 +207,14 @@ prints it). The choices behind it:
 
 Breadth first from the project, then one node per key by minimal version
 selection as Go modules do it (the highest of version-like tags wins;
-exact revisions must agree), with every package linked flat into
+exact revisions must agree), over the requirements in force only: the
+project's and those of the selected versions it reaches, so a version
+that lost takes its requirements with it. Every package linked flat into
 `.scad/libraries`, since SCAD's include namespace is flat and one copy
 per name is the only workable policy. The README has the rules. A
 conflict names both requirers:
 
-    conflicting requirements for `B`: `app` wants rev 8c3f1a92e4 (commit 8c3f1a9), `A` wants tag v1.0.0 (commit 21d0b57); exact revisions must agree (only version tags like v1.2.3 are reconciled), so make them name the same commit
+    conflicting requirements for `B`: `app` wants rev 8c3f1a92e4 (commit 8c3f1a9), `A` v1 wants tag v1.0.0 (commit 21d0b57); exact revisions must agree (only version tags like v1.2.3 are reconciled), so make them name the same commit
 
 A requirement that matches a lockfile entry exactly keeps the locked
 commit, so editing one dependency never moves another and `neoscad
@@ -214,7 +222,8 @@ fetch` never moves a branch by itself; `neoscad update` fetches the
 mirrors and resolves the named keys (or all) afresh.
 
 **Fast path.** When `scad.lock` exists, its `inputs` hash matches the
-manifests and every locked checkout is in the store, `neoscad fetch`
+manifests, its entries agree with `scad.toml` (see "Security") and every
+locked checkout is in the store, `neoscad fetch`
 resolves nothing and runs no git: it checks each checkout's hash, fixes
 any link that does not point at it and rewrites the store index.
 
@@ -224,6 +233,34 @@ Fetching never executes code from a dependency (no build scripts, no git
 hooks run by `checkout-index`), and evaluation is pure. The `import()` of
 meshes and fonts from dependencies is not limited to the dependency tree
 yet (see `docs/followups.md`).
+
+The trust model is Cargo's: your project's `scad.toml` is yours, and
+everything else may be someone else's (a cloned project's `scad.lock`
+and `.scad/`, each git dependency's own `scad.toml`). So `neoscad fetch`
+in a project you just cloned can neither run a command nor change files
+outside the project and the store:
+
+- Values from manifests and lockfiles never reach git as options (every
+  revision follows `--end-of-options`, every URL `--`), and a lockfile's
+  `commit` must be a full hex commit id.
+- `scad.lock`'s entries for the dependencies your `scad.toml` declares
+  must match it (URL, revision, `include_root`, folder); one that does
+  not is resolved again, or with `--locked` is an error. The entries for
+  their dependencies are trusted as locked, as Cargo trusts its
+  lockfile: their commits and content hashes are what is checked out and
+  verified.
+- A git dependency's `scad.toml` may name only remote repositories (not
+  a local path, `file://` or a `transport::` helper), and remotes that
+  only dependencies name are fetched under git's stricter policy
+  (`GIT_PROTOCOL_FROM_USER=0`, `protocol.ext.allow=never`). Your own
+  `scad.toml` may use any URL git accepts.
+- Folder names are limited to letters, digits, `.`, `_` and `-` (and no
+  Windows device names), `include_root` stays inside its repository,
+  `.scad` and `.scad/libraries` must be real directories, and a fetch
+  removes only the links and copies it made.
+- A checkout already in the store is verified against the lockfile's
+  hash, or, for a new lock entry, against a fresh checkout of its
+  commit, and a graph holds at most 1000 packages.
 
 ### Against the proposal
 

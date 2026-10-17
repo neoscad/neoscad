@@ -118,15 +118,41 @@ fn url(dir: &Path) -> String {
     }
 }
 
+/// The remote that a dependency's own manifest names the test's
+/// repositories by. A dependency may only name remote repositories (a
+/// `file://` URL there is refused, and git's file transport is off for
+/// them), so a test that has one library require another writes
+/// `{HOST}name`, and [`Env::with_host`] has git rewrite it to the
+/// repository in the test's directory, as a user's `insteadOf` would.
+const HOST: &str = "https://scad-deps.invalid/";
+
+fn remote(name: &str) -> String {
+    format!("{HOST}{name}")
+}
+
 struct Env {
     store: PathBuf,
+    /// Git configuration for every scad-deps run (`GIT_CONFIG_COUNT`).
+    config: Vec<(String, String)>,
 }
 
 impl Env {
     fn new(base: &Path) -> Env {
         Env {
             store: base.join("store"),
+            config: Vec::new(),
         }
+    }
+
+    /// [`HOST`] leads to the repositories under `base`, and git may use
+    /// its file transport for a dependency's remote.
+    fn with_host(base: &Path) -> Env {
+        let mut env = Env::new(base);
+        env.config = vec![
+            (format!("url.{}/.insteadOf", url(base)), HOST.to_string()),
+            ("protocol.file.allow".into(), "always".into()),
+        ];
+        env
     }
 
     fn run(&self, dir: &Path, args: &[&str]) -> Output {
@@ -142,7 +168,13 @@ impl Env {
             .env_remove("OPENSCADPATH")
             .env_remove("SCAD_GIT")
             .env_remove("NEOSCAD_GIT")
+            .env_remove("GIT_PROTOCOL_FROM_USER")
             .stdin(Stdio::null());
+        c.env("GIT_CONFIG_COUNT", self.config.len().to_string());
+        for (i, (k, v)) in self.config.iter().enumerate() {
+            c.env(format!("GIT_CONFIG_KEY_{i}"), k)
+                .env(format!("GIT_CONFIG_VALUE_{i}"), v);
+        }
         for (k, v) in env {
             c.env(k, v);
         }
@@ -430,18 +462,19 @@ fn a_modified_checkout_fails_the_hash() {
 #[test]
 fn transitive_dependencies_and_conflicts() {
     let base = scratch("graph");
-    let env = Env::new(&base);
-    let ub = repo(
+    let env = Env::with_host(&base);
+    repo(
         &base.join("b"),
         &[("b.scad", "function b() = \"b1\";\n")],
         "v1.0.0",
     );
+    let ub = remote("b");
     let b11 = commit(
         &base.join("b"),
         &[("b.scad", "function b() = \"b11\";\n")],
         "v1.1.0",
     );
-    let ua = repo(
+    repo(
         &base.join("a"),
         &[
             ("src/a.scad", "use <B/b.scad>\nmodule a() echo(b());\n"),
@@ -454,6 +487,7 @@ fn transitive_dependencies_and_conflicts() {
         ],
         "v1",
     );
+    let ua = remote("a");
     let b_file =
         |app: &Path| std::fs::read_to_string(app.join(".scad/libraries/B/b.scad")).unwrap();
     // The app wants A (which wants B v1.0.0) and B v1.1.0: v1.1.0 wins.
@@ -498,7 +532,7 @@ fn transitive_dependencies_and_conflicts() {
     assert!(
         e.contains("conflicting requirements for `B`")
             && e.contains("`app` wants rev")
-            && e.contains("`A` wants tag v1.0.0")
+            && e.contains("`A` v1 wants tag v1.0.0")
             && e.contains(&b1[..7]),
         "{e}"
     );
@@ -812,4 +846,407 @@ fn help_and_version_name_the_program() {
     );
     let o = env.run(&base, &["frobnicate"]);
     assert_ne!(o.status.code(), Some(0));
+}
+
+/// `scad.lock` as text, with `f` applied to it.
+fn edit_lock(app: &Path, f: impl FnOnce(String) -> String) {
+    let p = app.join("scad.lock");
+    let t = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, f(t)).unwrap();
+}
+
+/// A project with `Lib` (tag v1.0.0) fetched and locked.
+fn locked_project(base: &Path, env: &Env) -> (PathBuf, String) {
+    let u = repo(&base.join("lib"), &[("x.scad", &lib_v("v1"))], "v1.0.0");
+    let app = project(base, "app");
+    env.ok(&app, &["add", "Lib", "--git", &u, "--tag", "v1.0.0"]);
+    (app, u)
+}
+
+/// A lockfile that came with a cloned project cannot make git run a
+/// command: its `commit` must be a commit id, and the project's own
+/// entries must say what scad.toml says (else the graph is resolved
+/// again, or `--locked` refuses).
+#[test]
+fn a_lockfile_cannot_inject_git_options() {
+    let base = scratch("inject");
+    let env = Env::new(&base);
+    let (app, _) = locked_project(&base, &env);
+    let good = std::fs::read_to_string(app.join("scad.lock")).unwrap();
+    let commit = good
+        .lines()
+        .find_map(|l| l.strip_prefix("commit = \""))
+        .unwrap()
+        .trim_end_matches('"')
+        .to_string();
+    // The reviewer's repro: an option as the commit, and a URL that is
+    // the project itself, with the store emptied so that git must fetch.
+    std::fs::write(
+        app.join("scad.toml"),
+        "[dependencies]\nLib = { git = \".\" }\n",
+    )
+    .unwrap();
+    edit_lock(&app, |t| {
+        t.replace(&commit, "--upload-pack=touch PWNED; git-upload-pack")
+            .replace(
+                &t.lines()
+                    .find(|l| l.starts_with("source = "))
+                    .unwrap()
+                    .to_string(),
+                "source = \"git+.\"",
+            )
+            .replace("tag = \"v1.0.0\"\n", "")
+    });
+    writable(&env.store);
+    std::fs::remove_dir_all(&env.store).unwrap();
+    let o = env.run(&app, &["fetch"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = text(&o.stderr);
+    assert!(e.contains("full commit id"), "{e}");
+    assert!(!app.join("PWNED").exists() && !base.join("PWNED").exists());
+
+    // A well-formed lock whose project entry names another remote than
+    // scad.toml: resolved again, and the lock says scad.toml's remote.
+    let other = repo(
+        &base.join("other"),
+        &[("x.scad", &lib_v("other"))],
+        "v1.0.0",
+    );
+    let (app, u) = (project(&base, "app2"), url(&base.join("lib")));
+    std::fs::write(
+        app.join("scad.toml"),
+        format!("[dependencies]\nLib = {{ git = \"{u}\", tag = \"v1.0.0\" }}\n"),
+    )
+    .unwrap();
+    env.ok(&app, &["fetch"]);
+    let good = std::fs::read_to_string(app.join("scad.lock")).unwrap();
+    edit_lock(&app, |t| t.replace(&u, &other));
+    let o = env.run(&app, &["fetch", "--locked"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = text(&o.stderr);
+    assert!(
+        e.contains("does not match scad.toml") && e.contains("`Lib`"),
+        "{e}"
+    );
+    env.ok(&app, &["fetch"]);
+    assert_eq!(
+        std::fs::read_to_string(app.join("scad.lock")).unwrap(),
+        good
+    );
+    assert_eq!(linked(&app), lib_v("v1"));
+    // The same for a changed folder or include_root.
+    edit_lock(&app, |t| {
+        t.replace(
+            "name = \"Lib\"\n",
+            "name = \"Lib\"\nfolder = \"Elsewhere\"\n",
+        )
+    });
+    env.ok(&app, &["fetch"]);
+    assert_eq!(
+        std::fs::read_to_string(app.join("scad.lock")).unwrap(),
+        good
+    );
+    assert!(!app.join(".scad/libraries/Elsewhere").exists());
+}
+
+/// A lockfile's folder names stay inside `.scad/libraries`.
+#[test]
+fn a_lockfile_cannot_name_a_folder_outside() {
+    let base = scratch("folder");
+    let env = Env::new(&base);
+    let (app, _) = locked_project(&base, &env);
+    let victim = base.join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("precious.txt"), "keep").unwrap();
+    for folder in ["../../victim", "..", "x&calc", "NUL"] {
+        edit_lock(&app, |t| {
+            let t: String = t
+                .lines()
+                .filter(|l| !l.starts_with("folder = "))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            t.replace(
+                "name = \"Lib\"\n",
+                &format!("name = \"Lib\"\nfolder = \"{folder}\"\n"),
+            )
+        });
+        let o = env.run(&app, &["fetch"]);
+        assert_eq!(o.status.code(), Some(1), "{folder}");
+        let e = text(&o.stderr);
+        assert!(e.contains("`folder`"), "{folder}: {e}");
+        assert!(victim.join("precious.txt").is_file(), "{folder}");
+    }
+}
+
+/// A committed `.scad` or `.scad/libraries` that is a link is refused,
+/// and only links and copies a fetch made are ever removed from it.
+#[cfg(unix)]
+#[test]
+fn a_linked_managed_directory_is_refused() {
+    let base = scratch("managed");
+    let env = Env::new(&base);
+    let (app, _) = locked_project(&base, &env);
+    let victim = base.join("victim");
+    std::fs::create_dir_all(victim.join("Unknown")).unwrap();
+    std::fs::write(victim.join("Unknown/precious.txt"), "keep").unwrap();
+    std::fs::write(victim.join("precious.txt"), "keep").unwrap();
+    let libs = app.join(".scad/libraries");
+    // The reviewer's repro: .scad/libraries leads to `../..`.
+    std::fs::remove_file(libs.join("Lib")).unwrap();
+    std::fs::remove_dir(&libs).unwrap();
+    let inner = victim.join("a/b");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::os::unix::fs::symlink("../..", inner.join("libraries")).unwrap();
+    std::os::unix::fs::symlink(inner.join("libraries"), &libs).unwrap();
+    let o = env.run(&app, &["fetch"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("is a link"), "{}", text(&o.stderr));
+    assert!(victim.join("Unknown/precious.txt").is_file());
+    assert!(victim.join("precious.txt").is_file());
+    // And .scad itself.
+    std::fs::remove_file(&libs).unwrap();
+    std::fs::remove_dir_all(app.join(".scad")).unwrap();
+    std::os::unix::fs::symlink(&victim, app.join(".scad")).unwrap();
+    let o = env.run(&app, &["fetch"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("is a link"), "{}", text(&o.stderr));
+    assert!(!victim.join("libraries").exists());
+    std::fs::remove_file(app.join(".scad")).unwrap();
+    // A real directory in .scad/libraries that no dependency names is
+    // left alone, and one where a dependency goes is an error.
+    env.ok(&app, &["fetch"]);
+    std::fs::create_dir_all(libs.join("Mine")).unwrap();
+    std::fs::write(libs.join("Mine/keep.scad"), "k = 1;\n").unwrap();
+    let r = env.json(&app, &["fetch"]);
+    assert_eq!(r["unlinked"], serde_json::json!([]), "{r}");
+    assert!(libs.join("Mine/keep.scad").is_file());
+    std::fs::remove_file(libs.join("Lib")).unwrap();
+    std::fs::create_dir_all(libs.join("Lib")).unwrap();
+    std::fs::write(libs.join("Lib/keep.scad"), "k = 1;\n").unwrap();
+    let o = env.run(&app, &["fetch"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o.stderr).contains("not a link or a copy"),
+        "{}",
+        text(&o.stderr)
+    );
+    assert!(libs.join("Lib/keep.scad").is_file());
+}
+
+/// A dependency's manifest may only name remotes, and git fetches them
+/// with its stricter transport policy; the project's own scad.toml is
+/// not limited.
+#[test]
+fn transitive_remotes_are_limited() {
+    let base = scratch("transport");
+    let a_with = |dep: &str| {
+        repo(
+            &base.join("a"),
+            &[(
+                "scad.toml",
+                &format!("[dependencies]\nB = {{ git = \"{dep}\", tag = \"v1\" }}\n"),
+            )],
+            "v1",
+        )
+    };
+    let ub = repo(&base.join("b"), &[("b.scad", "b = 1;\n")], "v1");
+    let app = project(&base, "app");
+    for (i, (dep, want)) in [
+        (ub.clone(), "file:// URL"),
+        (base.join("b").to_string_lossy().into_owned(), "local path"),
+        ("../b".to_string(), "local path"),
+        ("fd::3".to_string(), "remote helper"),
+        ("ext::sh -c touch% PWNED".to_string(), "remote helper"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ua = a_with(&dep);
+        std::fs::write(
+            app.join("scad.toml"),
+            format!("[dependencies]\nA = {{ git = \"{ua}\", tag = \"v1\" }}\n"),
+        )
+        .unwrap();
+        // A store each: A's tag moves between rounds.
+        let o = Env::new(&base.join(format!("s{i}"))).run(&app, &["fetch"]);
+        assert_eq!(o.status.code(), Some(1), "{dep}");
+        let e = text(&o.stderr);
+        assert!(
+            e.contains("which is refused") && e.contains(want),
+            "{dep}: {e}"
+        );
+    }
+    assert!(!app.join("PWNED").exists());
+    // A remote that git rewrites to a file:// URL is still refused, by
+    // git (GIT_PROTOCOL_FROM_USER=0), unless the user allows the file
+    // transport outright.
+    let ua = a_with(&remote("b"));
+    std::fs::write(
+        app.join("scad.toml"),
+        format!("[dependencies]\nA = {{ git = \"{ua}\", tag = \"v1\" }}\n"),
+    )
+    .unwrap();
+    let mut env = Env::with_host(&base);
+    env.store = base.join("s-last");
+    env.config.truncate(1);
+    let o = env.run(&app, &["fetch"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = text(&o.stderr);
+    assert!(e.contains("`B`") || e.contains("transport"), "{e}");
+    assert!(e.contains("not allowed"), "{e}");
+    env = Env::with_host(&base);
+    env.store = base.join("s-last");
+    env.ok(&app, &["fetch"]);
+    assert!(app.join(".scad/libraries/B/b.scad").is_file());
+}
+
+/// Only the requirements of selected versions count: the project wants
+/// A v2 and D, D wants A v1, and A v1 and A v2 pin different revisions
+/// of C. A v1 loses, and its pin of C goes with it.
+#[test]
+fn a_losing_version_does_not_conflict() {
+    let base = scratch("mvs");
+    let env = Env::with_host(&base);
+    let c1 = {
+        repo(&base.join("c"), &[("c.scad", "c = 1;\n")], "c1");
+        git(&base.join("c"), &["rev-parse", "HEAD"])
+    };
+    let c2 = commit(&base.join("c"), &[("c.scad", "c = 2;\n")], "c2");
+    let a_toml = |c: &str| {
+        format!(
+            "[dependencies]\nC = {{ git = \"{}\", rev = \"{c}\" }}\n",
+            remote("c")
+        )
+    };
+    repo(&base.join("a"), &[("scad.toml", &a_toml(&c1))], "v1.0.0");
+    commit(&base.join("a"), &[("scad.toml", &a_toml(&c2))], "v2.0.0");
+    repo(
+        &base.join("d"),
+        &[(
+            "scad.toml",
+            &format!(
+                "[dependencies]\nA = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+                remote("a")
+            ),
+        )],
+        "v1",
+    );
+    let app = project(&base, "app");
+    std::fs::write(
+        app.join("scad.toml"),
+        format!(
+            "[dependencies]\nA = {{ git = \"{}\", tag = \"v2.0.0\" }}\nD = {{ git = \"{}\", tag = \"v1\" }}\n",
+            remote("a"),
+            remote("d")
+        ),
+    )
+    .unwrap();
+    let r = env.json(&app, &["fetch"]);
+    let pkgs = r["packages"].as_array().unwrap();
+    let by = |n: &str| pkgs.iter().find(|p| p["name"] == n).unwrap().clone();
+    assert_eq!(pkgs.len(), 3, "{r}");
+    assert_eq!(by("A")["requested"], "tag v2.0.0", "{r}");
+    assert_eq!(by("C")["commit"], c2.as_str(), "{r}");
+    // Two tags equal as versions (`v1`, `1.0.0`) give the first by byte
+    // order, whichever side asks for which.
+    let e1 = repo(&base.join("e"), &[("e.scad", "e = 1;\n")], "v1");
+    let _ = e1;
+    commit(&base.join("e"), &[("e.scad", "e = 2;\n")], "1.0.0");
+    let f_toml = |tag: &str| {
+        format!(
+            "[dependencies]\nE = {{ git = \"{}\", tag = \"{tag}\" }}\n",
+            remote("e")
+        )
+    };
+    repo(&base.join("f"), &[("scad.toml", &f_toml("v1"))], "v1");
+    commit(&base.join("f"), &[("scad.toml", &f_toml("1.0.0"))], "v2");
+    for (mine, f) in [("1.0.0", "v1"), ("v1", "v2")] {
+        std::fs::write(
+            app.join("scad.toml"),
+            format!(
+                "[dependencies]\nE = {{ git = \"{}\", tag = \"{mine}\" }}\nF = {{ git = \"{}\", tag = \"{f}\" }}\n",
+                remote("e"),
+                remote("f")
+            ),
+        )
+        .unwrap();
+        let r = env.json(&app, &["fetch"]);
+        let e = r["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "E")
+            .unwrap()
+            .clone();
+        assert_eq!(e["requested"], "tag 1.0.0", "{mine}: {r}");
+    }
+}
+
+/// A project reached through a symbolic link writes its path
+/// dependencies as from its real directory, and the store knows it once.
+#[cfg(unix)]
+#[test]
+fn a_linked_project_path() {
+    let base = scratch("symroot");
+    let env = Env::new(&base);
+    let real = base.join("real");
+    std::fs::create_dir_all(real.join("shared")).unwrap();
+    std::fs::write(real.join("shared/x.scad"), lib_v("shared")).unwrap();
+    let app = project(&real, "app");
+    std::fs::write(
+        app.join("scad.toml"),
+        "[dependencies]\nLib = { path = \"../shared\" }\n",
+    )
+    .unwrap();
+    let link = base.join("link");
+    std::os::unix::fs::symlink(&app, &link).unwrap();
+    let r = env.json(&base, &["fetch", "--project", &link.to_string_lossy()]);
+    assert_eq!(r["packages"][0]["source"], "path+../shared", "{r}");
+    assert_eq!(linked(&link), lib_v("shared"));
+    env.ok(&base, &["fetch", "--project", &app.to_string_lossy()]);
+    let projects = std::fs::read_dir(env.store.join("projects"))
+        .unwrap()
+        .count();
+    assert_eq!(projects, 1);
+}
+
+/// A lockfile checked out with CRLF line endings is current.
+#[test]
+fn a_crlf_lockfile_is_current() {
+    let base = scratch("crlf");
+    let env = Env::new(&base);
+    let (app, _) = locked_project(&base, &env);
+    edit_lock(&app, |t| t.replace('\n', "\r\n"));
+    let crlf = std::fs::read(app.join("scad.lock")).unwrap();
+    let r = env.json(&app, &["fetch", "--locked"]);
+    assert_eq!(r["lock_changed"], false, "{r}");
+    assert_eq!(std::fs::read(app.join("scad.lock")).unwrap(), crlf);
+}
+
+/// With no locked hash to check it against, a checkout already in the
+/// store is checked against its commit, so an edit there is not locked
+/// in as the dependency's content.
+#[test]
+fn a_new_lock_does_not_trust_the_store() {
+    let base = scratch("relock");
+    let env = Env::new(&base);
+    let (app, _) = locked_project(&base, &env);
+    let good = std::fs::read_to_string(app.join("scad.lock")).unwrap();
+    let target = std::fs::canonicalize(app.join(".scad/libraries/Lib")).unwrap();
+    writable(&target);
+    std::fs::write(target.join("x.scad"), lib_v("evil")).unwrap();
+    std::fs::remove_file(app.join("scad.lock")).unwrap();
+    let o = env.run(&app, &["fetch"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = text(&o.stderr);
+    assert!(e.contains("was modified"), "{e}");
+    assert!(!app.join("scad.lock").exists());
+    // Restored, the same hash as before is locked.
+    writable(&target);
+    std::fs::remove_dir_all(&target).unwrap();
+    env.ok(&app, &["fetch"]);
+    assert_eq!(
+        std::fs::read_to_string(app.join("scad.lock")).unwrap(),
+        good
+    );
 }

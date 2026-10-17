@@ -39,13 +39,36 @@ pub struct Declared {
     pub fetched: bool,
 }
 
-/// The nearest directory at or above `start` holding a `scad.toml`.
+/// The nearest directory at or above `start` holding a `scad.toml`, as
+/// a canonical path. Canonical because a path dependency's directory is:
+/// a project reached through a symbolic link would otherwise write its
+/// path dependencies relative to the link's spelling of the root (which
+/// then names the wrong directory once `..` is resolved through the
+/// link), and the store would index one project under two names.
 pub fn find_root(start: &Path) -> Option<PathBuf> {
     let start = std::path::absolute(start).ok()?;
-    start
-        .ancestors()
-        .find(|d| d.join(MANIFEST).is_file())
-        .map(Path::to_path_buf)
+    let found = start.ancestors().find(|d| d.join(MANIFEST).is_file())?;
+    Some(canonicalize(found).unwrap_or_else(|_| found.to_path_buf()))
+}
+
+/// `std::fs::canonicalize`, without Windows' `\\?\` prefix on a plain
+/// drive path: an include joined onto a verbatim path keeps its `/`,
+/// which a verbatim path does not read as a separator, and a root and a
+/// path dependency spelt one with and one without the prefix share no
+/// prefix to write one relative to the other. Project roots and path
+/// dependencies go through it.
+pub(crate) fn canonicalize(p: &Path) -> std::io::Result<PathBuf> {
+    let c = std::fs::canonicalize(p)?;
+    #[cfg(windows)]
+    {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            return Ok(PathBuf::from(rest.to_string()));
+        }
+    }
+    Ok(c)
 }
 
 /// The project of the file `main` (the nearest `scad.toml` above it):

@@ -254,21 +254,78 @@ fn dep(key: &str, d: RawDep) -> Result<Dep> {
     })
 }
 
-/// A folder name usable as `include <Name/…>`.
+/// A folder name usable as `include <Name/…>`, and safe as a name on
+/// every platform: ASCII letters, digits, `.`, `_` and `-` only, no
+/// leading `.` or `-`, no trailing `.`, and none of Windows' reserved
+/// device names. The name comes from `scad.toml` and `scad.lock`, which a
+/// cloned project brings with it, and becomes a path under
+/// `.scad/libraries` that a fetch replaces and removes: a separator or
+/// `..` there would reach outside the project, a leading `-` reads as an
+/// option to whatever is handed the path, and `NUL` or `COM1` open a
+/// device on Windows instead of a folder.
 pub fn check_folder(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(format!("'{name}' is not a folder name"));
     }
-    if name.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*']) || name.starts_with('.') {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        || name.starts_with(['.', '-'])
+        || name.ends_with('.')
+    {
         return Err(format!(
-            "'{name}' is not a usable folder name (no path separators, no leading '.')"
+            "'{name}' is not a usable folder name (letters, digits, '.', '_' and '-' only, not starting with '.' or '-')"
+        ));
+    }
+    // Windows reserves these whatever the extension (`CON.scad` too).
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        return Err(format!(
+            "'{name}' is a device name on Windows, not a usable folder name"
         ));
     }
     Ok(())
 }
 
+/// Why a git URL that a dependency's own manifest declares (not the
+/// project's) is refused, if it is: a local path, `file://`, or a
+/// `<transport>::<address>` remote helper (`fd::`, `ext::`, which runs a
+/// command). A cloned project's dependencies are someone else's
+/// manifests, so they may only name remotes; the project's own
+/// `scad.toml` may name anything, as git itself allows.
+pub fn transitive_url_problem(url: &str) -> Option<&'static str> {
+    let u = url.trim();
+    if u.starts_with('-') {
+        return Some("it starts with '-'");
+    }
+    if let Some(i) = u.find("://") {
+        return u[..i]
+            .eq_ignore_ascii_case("file")
+            .then_some("it is a file:// URL");
+    }
+    if let Some(i) = u.find("::")
+        && u[..i]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'+' | b'.'))
+    {
+        return Some("it names a git remote helper (`transport::address`)");
+    }
+    // git reads anything without a `:` before the first `/` (and a
+    // Windows drive, `C:\…`) as a local path; `host:path` is scp-like
+    // ssh.
+    match u.find(':') {
+        None => Some("it is a local path"),
+        Some(i) if u[..i].contains(['/', '\\']) || i == 1 => Some("it is a local path"),
+        Some(_) => None,
+    }
+}
+
 /// `include_root` as a relative `/`-separated path, None for the root.
-fn normal_root(r: &str) -> std::result::Result<Option<String>, String> {
+pub(crate) fn normal_root(r: &str) -> std::result::Result<Option<String>, String> {
     let parts: Vec<&str> = r
         .split(['/', '\\'])
         .filter(|p| !p.is_empty() && *p != ".")
@@ -548,9 +605,54 @@ libraries = ["lib"]
                 "both use the folder name",
             ),
             ("[dependencies]\n\"a/b\" = { path = \"a\" }", "folder name"),
+            ("[dependencies]\n\"a&b\" = { path = \"a\" }", "folder name"),
+            ("[dependencies]\n\"-x\" = { path = \"a\" }", "folder name"),
+            (
+                "[dependencies]\nA = { path = \"a\", name = \"x%y\" }",
+                "folder name",
+            ),
+            ("[dependencies]\nnul = { path = \"a\" }", "device name"),
+            ("[dependencies]\nCOM1 = { path = \"a\" }", "device name"),
+            (
+                "[dependencies]\n\"CON.scad\" = { path = \"a\" }",
+                "device name",
+            ),
         ] {
             let e = parse(s).unwrap_err().0;
             assert!(e.contains(want), "{s}: {e}");
+        }
+    }
+
+    #[test]
+    fn folder_names_and_transitive_urls() {
+        for ok in ["BOSL2", "threads-scad", "a.b_c", "COM", "CONSOLE", "LPT10"] {
+            assert_eq!(check_folder(ok), Ok(()), "{ok}");
+        }
+        for bad in ["a b", "a^b", "x.", "\u{e9}t\u{e9}", "lpt3", "aux.txt"] {
+            assert!(check_folder(bad).is_err(), "{bad}");
+        }
+        for remote in [
+            "https://github.com/a/b",
+            "ssh://git@host/a",
+            "git@github.com:a/b.git",
+            "host:path",
+        ] {
+            assert_eq!(transitive_url_problem(remote), None, "{remote}");
+        }
+        for local in [
+            "/abs/repo",
+            "../sibling",
+            ".",
+            "repo",
+            "file:///r",
+            "FILE://host/r",
+            "C:\\r",
+            "a/b:c",
+            "fd::3",
+            "ext::sh -c touch% x",
+            "--upload-pack=x",
+        ] {
+            assert!(transitive_url_problem(local).is_some(), "{local}");
         }
     }
 

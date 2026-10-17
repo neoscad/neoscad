@@ -247,7 +247,7 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     crate::deps::add_sources(&program.sources);
     let hints = Hints {
         project: project.as_ref(),
-        print: !job.json,
+        print: !job.json && !job.quiet,
     };
     let stopped = parser_diagnostics(&program, job.hardwarnings, paths, con, &hints);
     if stopped || program.has_syntax_errors() {
@@ -359,7 +359,8 @@ fn parser_diagnostics<W: Write>(
 
 /// The project's hints for includes it could not resolve
 /// (`lang::project::ProjectLibs::missing_hint`): in the JSON report's
-/// diagnostics, and printed after the warning when `print`.
+/// diagnostics, and printed after the warning when `print` (not for
+/// `--format json`, nor under `-q`, which keeps the warning quiet too).
 struct Hints<'a> {
     project: Option<&'a lang::project::ProjectLibs>,
     print: bool,

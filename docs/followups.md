@@ -3025,9 +3025,13 @@ From the dependency manager (`docs/dependencies.md`, issue #1).
 - scad-deps is meant to move to its own repository (as sketch-solver
   did), with NeoSCAD depending on it from crates.io; `crates/project` is
   self-contained for that (its own version, licence, lints and tests).
-- The Windows links (directory symbolic link, then junction, then copy)
-  compile and are reasoned through but are not yet exercised by CI on
-  Windows.
+- On Windows a fetch makes a directory symbolic link, else a copy (no
+  junction: see `docs/dependencies.md`, "Links"). The `windows` job in
+  `ci.yml` runs scad-deps' tests (`cargo test -p neoscad-cli -p
+  neoscad-lang -p scad-deps`), which take whichever of the two the
+  runner allows; the other one is not exercised there. A junction made
+  through `DeviceIoControl` (no `cmd`) would save Windows users without
+  Developer Mode a copy per project.
 - The session's parse cache does not notice a new file that would shadow
   a library include (a `Lib/x.scad` created next to the main file after a
   warm parse that found it in a library directory); this predates the

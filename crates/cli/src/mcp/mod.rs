@@ -291,10 +291,13 @@ pub fn main(args: Vec<OsString>) -> u8 {
     // rooted file system.
     let open = crate::host::Host::from_env();
     let mut read: Vec<PathBuf> = open.libs.0.clone();
-    // A project's dependencies are links into the shared store
-    // (`docs/dependencies.md`): readable like any library directory.
+    // A project's dependencies are links into the shared store's
+    // checkouts (`docs/dependencies.md`): readable like any library
+    // directory. Only the checkouts: the rest of the store (bare mirrors,
+    // the project index, which names every project on the machine) is no
+    // model's to read.
     if let Ok(store) = scad_deps::store::locate(None) {
-        read.push(store);
+        read.push(store.join("checkouts"));
     }
     for f in open.font_sources() {
         if let crate::host::FontSource::Dir(d) = f {

@@ -8,6 +8,16 @@
 //! ([`Git::checkout`]) runs with the user's and the system's git
 //! configuration turned off, so line-ending conversion and filters cannot
 //! make the same commit check out to different bytes on two machines.
+//!
+//! Every revision handed to git follows `--end-of-options` (and a URL
+//! follows `--`), so a value from a manifest or a lockfile is never read
+//! as an option: `git fetch origin --upload-pack=CMD` runs CMD. A remote
+//! that a dependency's manifest names, rather than the project's own
+//! ([`Remote::Dependency`]), is fetched as git fetches a submodule's:
+//! with `GIT_PROTOCOL_FROM_USER=0`, so transports git trusts only when a
+//! user typed them (`file`, remote helpers) are refused, and with the
+//! `ext::` transport, which runs a command, off whatever the user's
+//! configuration says.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -21,6 +31,18 @@ pub const GIT_ENV: &str = "SCAD_GIT";
 
 /// An alias of [`GIT_ENV`], read when that is unset.
 pub const GIT_ENV_ALIAS: &str = "NEOSCAD_GIT";
+
+/// Who named the remote a network command reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remote {
+    /// The project's own `scad.toml` (or a path dependency's, which is on
+    /// this machine too): git's usual policy.
+    Project,
+    /// A git dependency's manifest, or a lockfile entry no `scad.toml` of
+    /// this machine declares: only the transports git allows without a
+    /// user asking.
+    Dependency,
+}
 
 /// How to run git.
 #[derive(Debug, Clone)]
@@ -48,6 +70,16 @@ impl Git {
         c
     }
 
+    /// [`Git::command`] for a command that reaches `remote`.
+    fn network(&self, git_dir: Option<&Path>, remote: Remote) -> Command {
+        let mut c = self.command(git_dir);
+        if remote == Remote::Dependency {
+            c.env("GIT_PROTOCOL_FROM_USER", "0")
+                .args(["-c", "protocol.ext.allow=never"]);
+        }
+        c
+    }
+
     fn run<I, S>(&self, git_dir: Option<&Path>, args: I, what: &str) -> Result<Vec<u8>>
     where
         I: IntoIterator<Item = S>,
@@ -59,40 +91,41 @@ impl Git {
     }
 
     /// `git clone --bare URL DEST`.
-    pub fn clone_bare(&self, url: &str, dest: &Path) -> Result<()> {
-        let mut c = self.command(None);
+    pub fn clone_bare(&self, url: &str, dest: &Path, remote: Remote) -> Result<()> {
+        let mut c = self.network(None, remote);
         c.args(["clone", "--bare", "--quiet", "--", url]).arg(dest);
         output(c, &self.exe, &format!("cloning {url}")).map(drop)
     }
 
     /// Update every branch and tag of `mirror` from its remote (moved
     /// tags too; deleted ones are pruned).
-    pub fn fetch(&self, mirror: &Path, url: &str) -> Result<()> {
-        self.run(
-            Some(mirror),
-            [
-                "fetch",
-                "--quiet",
-                "--prune",
-                "--force",
-                "origin",
-                "+refs/heads/*:refs/heads/*",
-                "+refs/tags/*:refs/tags/*",
-            ],
-            &format!("fetching {url}"),
-        )
-        .map(drop)
+    pub fn fetch(&self, mirror: &Path, url: &str, remote: Remote) -> Result<()> {
+        let mut c = self.network(Some(mirror), remote);
+        c.args([
+            "fetch",
+            "--quiet",
+            "--prune",
+            "--force",
+            "--end-of-options",
+            "origin",
+            "+refs/heads/*:refs/heads/*",
+            "+refs/tags/*:refs/tags/*",
+        ]);
+        output(c, &self.exe, &format!("fetching {url}")).map(drop)
     }
 
     /// Fetch one commit by id, for a `rev` no branch or tag reaches
     /// (servers that allow it, as GitHub does).
-    pub fn fetch_commit(&self, mirror: &Path, url: &str, commit: &str) -> Result<()> {
-        self.run(
-            Some(mirror),
-            ["fetch", "--quiet", "origin", commit],
-            &format!("fetching {commit} from {url}"),
-        )
-        .map(drop)
+    pub fn fetch_commit(
+        &self,
+        mirror: &Path,
+        url: &str,
+        commit: &str,
+        remote: Remote,
+    ) -> Result<()> {
+        let mut c = self.network(Some(mirror), remote);
+        c.args(["fetch", "--quiet", "--end-of-options", "origin", commit]);
+        output(c, &self.exe, &format!("fetching {commit} from {url}")).map(drop)
     }
 
     /// The commit `spec` names in `mirror` (a ref or an abbreviated id),
@@ -119,20 +152,33 @@ impl Git {
     pub fn show(&self, mirror: &Path, commit: &str, path: &str) -> Option<Vec<u8>> {
         let spec = format!("{commit}:{path}");
         let t = self
-            .run(Some(mirror), ["cat-file", "-t", &spec], "cat-file")
+            .run(
+                Some(mirror),
+                ["cat-file", "-t", "--end-of-options", &spec],
+                "cat-file",
+            )
             .ok()?;
         if String::from_utf8_lossy(&t).trim() != "blob" {
             return None;
         }
-        self.run(Some(mirror), ["cat-file", "blob", &spec], "cat-file")
-            .ok()
+        self.run(
+            Some(mirror),
+            ["cat-file", "blob", "--end-of-options", &spec],
+            "cat-file",
+        )
+        .ok()
     }
 
     /// Whether `commit` has a directory at `path`.
     pub fn has_dir(&self, mirror: &Path, commit: &str, path: &str) -> bool {
         self.run(
             Some(mirror),
-            ["cat-file", "-t", &format!("{commit}:{path}")],
+            [
+                "cat-file",
+                "-t",
+                "--end-of-options",
+                &format!("{commit}:{path}"),
+            ],
             "cat-file",
         )
         .is_ok_and(|t| String::from_utf8_lossy(&t).trim() == "tree")

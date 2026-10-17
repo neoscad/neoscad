@@ -62,7 +62,7 @@ and share the same store:
 
 Every command except `store` takes `--project DIR` (default: the working
 directory; the project is the nearest directory at or above it holding
-a `scad.toml`), and every command takes `--format json` (one JSON object on stdout, `"schema": 1`). The
+a `scad.toml`, taken by its canonical path, with links resolved), and every command takes `--format json` (one JSON object on stdout, `"schema": 1`). The
 commands that fetch also take `--store DIR`, `--offline` (no git command
 that reaches the network) and `--locked` (fail if `scad.lock` is
 missing, out of date or would change: for CI). Progress and summaries
@@ -101,13 +101,17 @@ libraries = ["lib"]               # project folders searched after .scad/librari
 - A `[dependencies]` key is the dependency's identity in the graph, and
   one revision of it is selected. Unless `name` says otherwise, the key
   is also the folder name that `include <Key/…>` uses. Folder names must
-  be unique, non-empty, not `.` or `..`, must not start with `.` and must
-  not contain `/ \ : < > " | ? *`.
+  be unique, use only ASCII letters, digits, `.`, `_` and `-`, not start
+  with `.` or `-`, not end with `.`, and not be a Windows device name
+  (`CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`, with or
+  without an extension, in any case).
 - A **git** dependency has `git = URL` and at most one of `tag`, `rev`
   (a commit id: at least 4 hex digits, compared in lower case) and
   `branch`. With none of them, it follows the remote's default branch.
-  The URL can be anything git accepts (https, ssh, `git@host:path`,
-  `file://`); the user's own git credentials and configuration apply.
+  In the project's own manifest (and a path dependency's) the URL can be
+  anything git accepts (https, ssh, `git@host:path`, `file://`, a local
+  path); the user's own git credentials and configuration apply. In a
+  git dependency's manifest it must name a remote: see "Security".
 - A **path** dependency has `path = DIR`, relative to the directory of
   the manifest that declares it. It is linked as it is, never copied,
   and takes no `tag`, `rev` or `branch`.
@@ -122,8 +126,9 @@ libraries = ["lib"]               # project folders searched after .scad/librari
 A dependency's own `scad.toml` adds its dependencies to the graph. For a
 git dependency, the manifest is read at the resolved commit, from the
 repository root or else from its `include_root`. A git dependency may
-not declare path dependencies. A library without a manifest has no
-dependencies.
+not declare path dependencies, nor git ones at a local path, a
+`file://` URL or a `transport::address` remote helper. A library
+without a manifest has no dependencies.
 
 `add` and `remove` edit the file line by line, keeping comments, order
 and the other tables as they are.
@@ -175,8 +180,14 @@ file uses `\n` line endings and ends with a newline. It holds no path
 specific to one machine.
 
 A reader rejects a `version` it does not know, a git package without
-both `commit` and `hash`, and a package with more than one of `tag`,
-`rev` and `branch`.
+both `commit` and `hash`, a package with more than one of `tag`, `rev`
+and `branch`, and more than 1000 packages. It also rejects, since a
+lockfile comes with a cloned project and its values become git
+arguments and paths: a `commit` that is not 40 or 64 lowercase hex
+digits, a `hash` that is not `sha256:` and 64 lowercase hex digits, a
+`name`, `folder` or dependency key that is not a folder name (as in the
+manifest), an `include_root` with `..` or an absolute path, and a git
+URL starting with `-`.
 
 **`inputs`** is a hash of every requirement the project and its path
 dependencies declare (directly or through other path dependencies;
@@ -193,8 +204,23 @@ reference as the lockfile writes it (`tag = "v1"`, `rev = "abc1"`,
 the URL is always there), or `path+DIR`, with DIR relative to the
 project root as above. Sort the distinct lines by their bytes and join
 them with `\n`. `inputs` is `sha256:` followed by the lowercase hex
-SHA-256 of the result. While `inputs` matches the manifests, a fetch
-links the locked packages and resolves nothing.
+SHA-256 of the result. While `inputs` matches the manifests and the
+lockfile agrees with the project's own manifest (below), a fetch links
+the locked packages and resolves nothing.
+
+The lockfile agrees with the manifest when every dependency the
+project's `scad.toml` declares has a package of its key with the same
+folder, `include_root` and source: the same URL after normalising and
+the same revision (or, for a version tag, a tag at least as high, which
+minimal version selection may have chosen), or the same `path+DIR`. And
+no git package that no manifest of the project names may have a URL
+that a dependency's manifest could not declare. A lockfile that does not
+agree is resolved again (or, with `--locked`, is an error), as one with
+stale `inputs` is: `inputs` covers what the manifests ask, not what the
+lockfile answers, and anyone can write a lockfile whose `inputs` match.
+
+The lockfile is compared with what a fetch would write as data, not as
+text, so a lockfile checked out with CRLF line endings is current.
 
 ### The content hash
 
@@ -244,19 +270,29 @@ path requirement to its directory. Then each key gets exactly one node:
   wins. A version is an optional `v` or `V`, one to three dot-separated
   numbers (missing ones count as 0), an optional `-pre-release` and an
   optional `+build`, which is ignored. Numbers compare numerically. A
-  pre-release sorts before its release, and two pre-releases compare as
-  strings.
+  pre-release sorts before its release. Two pre-releases compare
+  identifier by identifier (split at `.`), as semver does: numeric
+  identifiers as numbers and before alphanumeric ones, which compare
+  with their runs of digits as numbers (`rc2` before `rc10`), and a
+  shorter list before a longer one it begins. Of tags that are equal as
+  versions (`v1` and `1.0.0`), the first in byte order wins.
 - Otherwise all requirements of the key must name the same commit, or
-  resolution fails with an error that names two requirers and what each
-  one wants.
+  resolution fails with an error that names two requirers (a dependency
+  with the version of it that requires: `` `A` v1 wants … ``) and what
+  each one wants.
 - Every requirement of a key must also agree on the source (one URL
   after normalising, or one directory), on `include_root` and on the
   folder name.
 
-The result is pruned to what the project reaches through the selected
-nodes. Every package is linked flat into `.scad/libraries`: SCAD's
-include namespace is flat, so one copy per name is the only workable
-policy.
+Only requirements in force take part: the project's, and those of the
+nodes that are selected and that the project reaches through selected
+nodes. A version that is not selected takes its own requirements with
+it, so they can neither win nor conflict. The selection is therefore
+repeated, from the project's requirements outwards, until it no longer
+changes (a graph that does not settle within one round per node is an
+error). A graph holds at most 1000 nodes. Every package is linked flat
+into `.scad/libraries`: SCAD's include namespace is flat, so one copy
+per name is the only workable policy.
 
 A requirement that matches a lockfile entry exactly (key, URL, revision,
 `include_root`) keeps the locked commit. Editing one dependency never
@@ -316,12 +352,15 @@ store serves all of them.
   are set, so the bytes and the content hash are the same on every
   machine. Submodules and LFS objects are not fetched. The tree is
   written in `tmp/`, hashed, renamed into place and made read-only
-  (files, and on Unix directories too).
+  (files, and on Unix directories too). A checkout already in the store
+  is checked against the lockfile's hash; where there is none yet (a new
+  lockfile, a new revision), against a fresh checkout of its commit in
+  `tmp/`, so an edit made in the store is never written to a lockfile.
 - Every change to the store holds an OS file lock on `lock`, so
   concurrent fetches take turns, and the second finds the first's work.
   A checkout appears in one rename, so a reader never sees half of one.
 - **The index**: each fetch rewrites `projects/<first 16 hex digits of
-  the SHA-256 of the project root's absolute path>.toml`, which holds
+  the SHA-256 of the project root's canonical path>.toml`, which holds
   `root = "…"`, `checkouts = […]` and `mirrors = […]` (directory names).
   `store gc` drops the entries of projects whose `scad.toml` is gone,
   then removes every checkout and mirror that no remaining project
@@ -334,12 +373,16 @@ a path dependency, to its directory), joined with its `include_root`:
 
 - on Unix, a symbolic link;
 - on Windows, a directory symbolic link where the user may make one
-  (Developer Mode); otherwise a directory junction, which needs no
-  privilege but only works on local volumes; otherwise a copy.
+  (Developer Mode); otherwise a copy, holding a marker file
+  `.scad-deps-copy`.
 
 A fetch changes only links that point somewhere else, and removes
-entries that are no longer dependencies. It writes `.scad/.gitignore`
-containing `*` if the file is missing. `vendor` copies the same trees as
+entries that are no longer dependencies. It only ever replaces or
+removes a link or a copy holding the marker: anything else in
+`.scad/libraries` (a directory, a file) is left alone, and is an error
+where a dependency's link must go. It refuses a `.scad` or
+`.scad/libraries` that is itself a link. It writes `.scad/.gitignore`
+containing `*` if nothing is there. `vendor` copies the same trees as
 plain, writable files (no links into the store) into a folder outside
 `.scad/`, leaving the folder's other entries alone.
 
@@ -347,6 +390,30 @@ plain, writable files (no links into the store) into a folder outside
 
 A fetch never runs code from a dependency: there are no build scripts,
 and `checkout-index` runs no git hooks.
+
+The trust model is Cargo's. The project's own `scad.toml` is the
+user's: its git URLs may be anything git accepts, and git runs with the
+user's configuration. Everything else may come from someone else (a
+cloned project's `scad.lock` and `.scad/`, every git dependency's
+`scad.toml`), and is limited so that a fetch of an untrusted project
+can neither run a command nor touch files outside the project and the
+store:
+
+- Every revision given to git follows `--end-of-options`, and every URL
+  `--`, so no value is read as an option.
+- The lockfile's fields are checked when it is read (above), and its
+  entries for the project's own dependencies must agree with
+  `scad.toml`. Its other entries, the dependencies' dependencies, are
+  trusted as locked: their commits and hashes are what a fetch checks
+  out and verifies.
+- A git dependency's manifest may name only remote repositories, and
+  every remote that no manifest of the project names (from a
+  dependency's manifest, or from the lockfile) is fetched with
+  `GIT_PROTOCOL_FROM_USER=0` and `protocol.ext.allow=never`, so git
+  allows only the transports it trusts without a user asking (https,
+  ssh, git).
+- Folder names and `include_root` cannot leave their directory, and a
+  fetch removes only the links and copies it made (see "Links").
 
 ## License
 

@@ -120,15 +120,35 @@ fn url(dir: &Path) -> String {
     }
 }
 
+/// The remote a dependency's own manifest names the test's repositories
+/// by: a dependency may only name remote repositories, so git rewrites
+/// this one to the test's directory ([`Env::with_host`]), as a user's
+/// `insteadOf` would.
+const HOST: &str = "https://scad-deps.invalid/";
+
 struct Env {
     store: PathBuf,
+    /// Git configuration for every run (`GIT_CONFIG_COUNT`).
+    config: Vec<(String, String)>,
 }
 
 impl Env {
     fn new(base: &Path) -> Env {
         Env {
             store: base.join("store"),
+            config: Vec::new(),
         }
+    }
+
+    /// [`HOST`] leads to the repositories under `base`, over git's file
+    /// transport, which it allows a dependency's remote only when told to.
+    fn with_host(base: &Path) -> Env {
+        let mut env = Env::new(base);
+        env.config = vec![
+            (format!("url.{}/.insteadOf", url(base)), HOST.to_string()),
+            ("protocol.file.allow".into(), "always".into()),
+        ];
+        env
     }
 
     fn run(&self, dir: &Path, args: &[&str]) -> Output {
@@ -145,7 +165,13 @@ impl Env {
             .env_remove("OPENSCADPATH")
             .env_remove("SCAD_GIT")
             .env_remove("NEOSCAD_GIT")
+            .env_remove("GIT_PROTOCOL_FROM_USER")
             .stdin(Stdio::null());
+        c.env("GIT_CONFIG_COUNT", self.config.len().to_string());
+        for (i, (k, v)) in self.config.iter().enumerate() {
+            c.env(format!("GIT_CONFIG_KEY_{i}"), k)
+                .env(format!("GIT_CONFIG_VALUE_{i}"), v);
+        }
         for (k, v) in env {
             c.env(k, v);
         }
@@ -243,8 +269,9 @@ fn neoscad_add_fetch_update_and_includes() {
 #[test]
 fn includes_reach_transitive_dependencies() {
     let base = scratch("graph");
-    let env = Env::new(&base);
-    let ub = repo(
+    let env = Env::with_host(&base);
+    let ub = format!("{HOST}b");
+    repo(
         &base.join("b"),
         &[("b.scad", "function b() = \"b1\";\n")],
         "v1.0.0",
@@ -254,7 +281,8 @@ fn includes_reach_transitive_dependencies() {
         &[("b.scad", "function b() = \"b11\";\n")],
         "v1.1.0",
     );
-    let ua = repo(
+    let ua = format!("{HOST}a");
+    repo(
         &base.join("a"),
         &[
             ("src/a.scad", "use <B/b.scad>\nmodule a() echo(b());\n"),
@@ -301,6 +329,9 @@ fn search_order_and_hints() {
         "{}",
         text(&o.stderr)
     );
+    // -q keeps it quiet, as it does the warning it follows.
+    let o = env.run_with(&app, &["main.scad", "-q", "-o", "out.echo"], &[]);
+    assert!(!text(&o.stderr).contains("hint"), "{}", text(&o.stderr));
     let check = env.run(&app, &["check", "main.scad", "--format", "json"]);
     let v: Value = serde_json::from_slice(&check.stdout).unwrap();
     let hints = v["diagnostics"]["items"][0]["hints"][0]["message"]

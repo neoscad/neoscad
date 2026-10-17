@@ -25,16 +25,42 @@
 //!
 //! The file is written here byte for byte (not by a serializer), so the
 //! same graph always gives the same file.
+//!
+//! A lockfile arrives with a cloned project, so reading one checks every
+//! field that later becomes a git argument or a path: a `commit` is a
+//! full lowercase hex id, `name` and `folder` are folder names
+//! ([`check_folder`]), `include_root` stays inside the repository, and a
+//! `hash` is `sha256:` and 64 hex digits. Whether the project's own
+//! entries still say what `scad.toml` says is the fetch's check, which
+//! re-resolves when they do not.
 
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::error::{Context, Error, Result, bail};
-use crate::manifest::{GitRef, quote};
+use crate::manifest::{GitRef, check_folder, normal_root, quote};
 
 /// The lockfile format this writes and reads.
 pub const VERSION: u32 = 1;
+
+/// The most packages a graph (and so a lockfile) may hold: far more than
+/// any OpenSCAD project uses, and a bound on the clones and checkouts a
+/// cloned project's dependencies can ask for.
+pub const MAX_PACKAGES: usize = 1000;
+
+/// Whether `c` is a full commit id as git prints it: 40 (SHA-1) or 64
+/// (SHA-256) lowercase hex digits. Nothing else may reach git as a
+/// commit: a lockfile's `commit = "--upload-pack=…"` would otherwise be
+/// an option of `git fetch`, which runs it.
+pub fn is_commit_id(c: &str) -> bool {
+    (c.len() == 40 || c.len() == 64) && c.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_hash(h: &str) -> bool {
+    h.strip_prefix(crate::hash::PREFIX)
+        .is_some_and(|d| d.len() == 64 && d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lock {
@@ -115,8 +141,28 @@ impl Lock {
                 raw.version
             );
         }
+        if raw.package.len() > MAX_PACKAGES {
+            bail!(
+                "{} packages, more than the {MAX_PACKAGES} a graph may hold",
+                raw.package.len()
+            );
+        }
         let mut packages = Vec::new();
         for p in raw.package {
+            check_folder(&p.name).map_err(|e| Error(format!("package `{}`: {e}", p.name)))?;
+            let folder = p.folder.unwrap_or_else(|| p.name.clone());
+            check_folder(&folder)
+                .map_err(|e| Error(format!("package `{}`: `folder`: {e}", p.name)))?;
+            let include_root = match &p.include_root {
+                None => None,
+                Some(r) => {
+                    normal_root(r).map_err(|e| Error(format!("package `{}`: {e}", p.name)))?
+                }
+            };
+            for d in &p.dependencies {
+                check_folder(d)
+                    .map_err(|e| Error(format!("package `{}`: dependency {e}", p.name)))?;
+            }
             let source = if let Some(url) = p.source.strip_prefix("git+") {
                 let reference = match (p.tag, p.rev, p.branch) {
                     (Some(t), None, None) => GitRef::Tag(t),
@@ -131,6 +177,22 @@ impl Lock {
                         p.name
                     );
                 };
+                if !is_commit_id(&commit) {
+                    bail!(
+                        "package `{}`: `commit` must be a full commit id (40 or 64 lowercase hex digits)",
+                        p.name
+                    );
+                }
+                if !is_hash(&hash) {
+                    bail!(
+                        "package `{}`: `hash` must be {}<64 lowercase hex digits>",
+                        p.name,
+                        crate::hash::PREFIX
+                    );
+                }
+                if url.is_empty() || url.trim_start().starts_with('-') {
+                    bail!("package `{}`: '{url}' is not a git URL", p.name);
+                }
                 LockedSource::Git {
                     url: url.to_string(),
                     reference,
@@ -143,10 +205,10 @@ impl Lock {
                 bail!("package `{}`: unknown source '{}'", p.name, p.source);
             };
             packages.push(Locked {
-                folder: p.folder.unwrap_or_else(|| p.name.clone()),
+                folder,
                 name: p.name,
                 source,
-                include_root: p.include_root,
+                include_root,
                 dependencies: p.dependencies,
             });
         }
@@ -224,7 +286,7 @@ mod tests {
                         url: "file:///r/a".into(),
                         reference: GitRef::Tag("v1.0.0".into()),
                         commit: "c".repeat(40),
-                        hash: "sha256:11".into(),
+                        hash: format!("sha256:{}", "1".repeat(64)),
                     },
                     include_root: Some("src".into()),
                     dependencies: vec!["B".into()],
@@ -247,5 +309,59 @@ mod tests {
                 .0
                 .contains("version 9")
         );
+    }
+
+    /// What a cloned project's lockfile could use to run a command or
+    /// reach outside the project is refused when it is read.
+    #[test]
+    fn refuses_unsafe_fields() {
+        let hash = format!("sha256:{}", "1".repeat(64));
+        let pkg = |fields: &str| {
+            format!("version = 1\ninputs = \"\"\n\n[[package]]\n{fields}\ndependencies = []\n")
+        };
+        let git = |name: &str, extra: &str, commit: &str| {
+            pkg(&format!(
+                "name = \"{name}\"\n{extra}source = \"git+https://h/r\"\ncommit = \"{commit}\"\nhash = \"{hash}\""
+            ))
+        };
+        let good = "c".repeat(40);
+        assert!(Lock::parse(&git("A", "", &good)).is_ok());
+        assert!(Lock::parse(&git("A", "", &"d".repeat(64))).is_ok());
+        for (text, want) in [
+            (
+                git("A", "", "--upload-pack=touch PWNED; git-upload-pack"),
+                "full commit id",
+            ),
+            (git("A", "", &"C".repeat(40)), "full commit id"),
+            (git("A", "", "abc1234"), "full commit id"),
+            (git("A", "", "\u{e9}".repeat(40).as_str()), "full commit id"),
+            (git("A", "folder = \"../..\"\n", &good), "folder"),
+            (git("A", "folder = \"x&y\"\n", &good), "folder"),
+            (git("../x", "", &good), "folder name"),
+            (
+                git("A", "include_root = \"../up\"\n", &good),
+                "inside the repository",
+            ),
+            (
+                pkg(&format!(
+                    "name = \"A\"\nsource = \"git+https://h/r\"\ncommit = \"{good}\"\nhash = \"md5:00\""
+                )),
+                "`hash` must be",
+            ),
+            (
+                pkg(&format!(
+                    "name = \"A\"\nsource = \"git+--upload-pack=x\"\ncommit = \"{good}\"\nhash = \"{hash}\""
+                )),
+                "not a git URL",
+            ),
+        ] {
+            let e = Lock::parse(&text).unwrap_err().0;
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        let many: String = (0..=MAX_PACKAGES)
+            .map(|i| format!("\n[[package]]\nname = \"P{i}\"\nsource = \"path+p\"\n"))
+            .collect();
+        let e = Lock::parse(&format!("version = 1\n{many}")).unwrap_err().0;
+        assert!(e.contains("more than the 1000"), "{e}");
     }
 }

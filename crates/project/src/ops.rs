@@ -12,7 +12,7 @@ use crate::manifest::{
     remove_dependency, set_dependency,
 };
 pub use crate::resolve::Update;
-use crate::resolve::{Resolver, Stats, inputs_hash, short};
+use crate::resolve::{Resolver, Stats, inputs_hash, lock_mismatch, project_urls, short};
 use crate::store::Store;
 
 /// The nearest directory at or above `start` with a `scad.toml`.
@@ -111,9 +111,14 @@ pub fn fetch(
         }
     }
     let inputs = inputs_hash(&manifest)?;
+    let trusted = project_urls(&manifest)?;
+    let mismatch = match &old {
+        Some(l) => lock_mismatch(l, &manifest, &trusted)?,
+        None => None,
+    };
     let current = old
         .as_ref()
-        .filter(|l| l.inputs == inputs && opts.update == Update::Nothing);
+        .filter(|l| l.inputs == inputs && opts.update == Update::Nothing && mismatch.is_none());
     let mut report = FetchReport {
         root: root.to_path_buf(),
         store: store.root().to_path_buf(),
@@ -122,7 +127,14 @@ pub fn fetch(
     let mut resolver;
     let mut lock = match current {
         Some(l) => {
-            resolver = Resolver::new(&store, opts.offline, None, &opts.update, &opts.program);
+            resolver = Resolver::new(
+                &store,
+                opts.offline,
+                None,
+                &opts.update,
+                &opts.program,
+                trusted,
+            );
             l.clone()
         }
         None => {
@@ -135,6 +147,11 @@ pub fn fetch(
                     Some(_) if opts.update != Update::Nothing => {
                         "--locked: an update would change scad.lock".into()
                     }
+                    Some(l) if l.inputs == inputs && mismatch.is_some() => format!(
+                        "--locked: scad.lock does not match scad.toml: {}; run `{} fetch` without --locked and commit scad.lock",
+                        mismatch.as_deref().unwrap_or_default(),
+                        opts.program
+                    ),
                     Some(_) => format!(
                         "--locked: scad.lock is out of date with scad.toml; run `{} fetch` without --locked and commit scad.lock",
                         opts.program
@@ -148,6 +165,7 @@ pub fn fetch(
                 old.as_ref(),
                 &opts.update,
                 &opts.program,
+                trusted,
             );
             resolver.resolve(&manifest)?
         }
@@ -155,6 +173,7 @@ pub fn fetch(
 
     // Check out what the store lacks, verify, and link.
     let libs = managed_dir(root);
+    check_managed(root)?;
     std::fs::create_dir_all(&libs).at("create", &libs)?;
     write_gitignore(root);
     let mut checkouts = Vec::new();
@@ -171,7 +190,27 @@ pub fn fetch(
                 let dir = store.checkout_path(url, commit, p.include_root.as_deref());
                 let mirror = store.mirror_path(url);
                 let actual = if dir.exists() {
-                    crate::hash::tree_hash(&dir)?
+                    let actual = crate::hash::tree_hash(&dir)?;
+                    if hash.is_empty() {
+                        // Nothing locked to compare the store's copy with
+                        // (a new lock, or a new revision): the commit's
+                        // own content is, built afresh. Taking the copy's
+                        // hash as it is would write an edit made in the
+                        // store into scad.lock as the dependency's truth.
+                        resolver.mirror(&p.name, url)?;
+                        resolver.ensure_commit(&p.name, url, &mirror, commit)?;
+                        let fresh = store.fresh_hash(&mirror, commit, p.include_root.as_deref())?;
+                        if fresh != actual {
+                            bail!(
+                                "the store's copy of `{}` ({}) was modified: its content hash is {actual}, its commit {} checks out to {fresh}. Delete that directory (it is read-only: make it writable first) and run `{} fetch` again",
+                                p.name,
+                                dir.display(),
+                                short(commit),
+                                opts.program
+                            );
+                        }
+                    }
+                    actual
                 } else {
                     progress(&format!(
                         "checking out {} {} ({})",
@@ -221,7 +260,7 @@ pub fn fetch(
             }
             LockedSource::Path(dir) => {
                 let joined = root.join(&*dir);
-                let mut target = std::fs::canonicalize(&joined).map_err(|e| {
+                let mut target = crate::search::canonicalize(&joined).map_err(|e| {
                     Error(format!(
                         "path dependency `{}`: {}: {e}",
                         p.name,
@@ -250,7 +289,10 @@ pub fn fetch(
             report.linked += 1;
         }
     }
-    // Entries no dependency has any more.
+    // Entries no dependency has any more: links, and copies a fetch made.
+    // Anything else (a directory or a file someone put there) is left as
+    // it is: `.scad/libraries` can arrive with a cloned project, and a
+    // fetch must not delete what it did not make.
     if let Ok(rd) = std::fs::read_dir(&libs) {
         let mut stale: Vec<String> = rd
             .flatten()
@@ -259,13 +301,20 @@ pub fn fetch(
             .collect();
         stale.sort();
         for n in stale {
-            link::remove(&libs.join(&n))?;
-            report.unlinked.push(n);
+            if link::remove_made(&libs.join(&n))? {
+                report.unlinked.push(n);
+            } else {
+                progress(&format!(
+                    "left .scad/libraries/{n} alone: it is not a link or a copy that a fetch made"
+                ));
+            }
         }
     }
     let text = lock.render();
-    let old_text = std::fs::read_to_string(&lock_path).ok();
-    report.lock_changed = old_text.as_deref() != Some(text.as_str());
+    // Compared as read, not as text, so a lockfile that only differs in
+    // its line endings (a checkout with `core.autocrlf`) is current, and
+    // `--locked` accepts it.
+    report.lock_changed = old.as_ref() != Some(&lock);
     if report.lock_changed {
         if opts.locked {
             bail!("--locked: scad.lock would change");
@@ -295,15 +344,40 @@ fn describe_ref(r: &GitRef) -> String {
     }
 }
 
+/// Refuse a `.scad` or `.scad/libraries` that is a link (or a junction)
+/// or not a directory. A fetch creates, replaces and removes entries of
+/// `.scad/libraries`; a cloned project that committed it as a link to
+/// `../..` would otherwise have a fetch do that beside the project.
+fn check_managed(root: &Path) -> Result<()> {
+    for d in [root.join(".scad"), managed_dir(root)] {
+        let Ok(meta) = std::fs::symlink_metadata(&d) else {
+            continue;
+        };
+        if link::is_link(&d) || !meta.is_dir() {
+            bail!(
+                "{} is {}, not a directory of the project; a fetch only manages a real directory there. Remove it and fetch again",
+                d.display(),
+                if link::is_link(&d) {
+                    "a link"
+                } else {
+                    "a file"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `.scad/.gitignore` ignoring everything in `.scad`, so the links (which
 /// name this machine's store) are never committed, with no change to the
-/// project's own `.gitignore`.
+/// project's own `.gitignore`. Created only where nothing is (not even a
+/// dangling link, which writing would follow).
 fn write_gitignore(root: &Path) {
+    use std::io::Write;
     let p = root.join(".scad").join(".gitignore");
-    if !p.exists() {
-        let _ = std::fs::write(
-            &p,
-            "# .scad/ holds this machine's links to its library store: never commit it.\n*\n",
+    if let Ok(mut f) = std::fs::File::create_new(&p) {
+        let _ = f.write_all(
+            b"# .scad/ holds this machine's links to its library store: never commit it.\n*\n",
         );
     }
 }
@@ -477,10 +551,22 @@ pub fn vendor(root: &Path, report: &FetchReport, dir: Option<&Path>) -> Result<V
     let dir = match dir {
         Some(d) if d.is_absolute() => d.to_path_buf(),
         Some(d) => std::env::current_dir().unwrap_or_default().join(d),
-        None => root.join("libraries"),
+        None => {
+            // The default is inside the project, which may be someone
+            // else's: a committed `libraries` link would have the copies
+            // (and the removal of what they replace) land where it leads.
+            let d = root.join("libraries");
+            if link::is_link(&d) {
+                bail!(
+                    "{} is a link; vendor into a directory of the project (or name one)",
+                    d.display()
+                );
+            }
+            d
+        }
     };
     std::fs::create_dir_all(&dir).at("create", &dir)?;
-    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let dir = crate::search::canonicalize(&dir).unwrap_or(dir);
     if dir.starts_with(managed_dir(root)) {
         bail!("vendor into a folder outside .scad/");
     }

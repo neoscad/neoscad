@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 
 use crate::error::{Context, Result, bail};
-use crate::git::Git;
+use crate::git::{Git, Remote};
 use crate::hash::digest;
 use crate::manifest::{MANIFEST, quote};
 
@@ -153,7 +153,11 @@ impl Store {
     /// The checkout of `commit` of `url` (its `include_root` folder).
     pub fn checkout_path(&self, url: &str, commit: &str, include_root: Option<&str>) -> PathBuf {
         let n = normalize_url(url);
-        let mut name = format!("{}-{}", label(&n), &commit[..commit.len().min(12)]);
+        // By characters, not bytes: a commit is hex by the time it gets
+        // here (the lockfile and git both make sure), but a slice through
+        // a multi-byte character would panic rather than fail.
+        let head: String = commit.chars().take(12).collect();
+        let mut name = format!("{}-{head}", label(&n));
         if let Some(r) = include_root {
             name.push('-');
             name.push_str(&digest(r)[..8]);
@@ -177,13 +181,13 @@ impl Store {
     }
 
     /// Clone `url` into its mirror (through `tmp/`, renamed into place).
-    pub fn clone_mirror(&self, url: &str) -> Result<PathBuf> {
+    pub fn clone_mirror(&self, url: &str, remote: Remote) -> Result<PathBuf> {
         let dest = self.mirror_path(url);
         let tmp = self.scratch()?;
         let staged = tmp.join("mirror.git");
         let r = self
             .git
-            .clone_bare(url, &staged)
+            .clone_bare(url, &staged, remote)
             .and_then(|()| std::fs::rename(&staged, &dest).at("create", &dest));
         let _ = std::fs::remove_dir_all(&tmp);
         r.map(|()| dest)
@@ -198,6 +202,30 @@ impl Store {
         include_root: Option<&str>,
         dest: &Path,
     ) -> Result<String> {
+        self.build(mirror, commit, include_root, Some(dest))
+    }
+
+    /// The content hash `commit` (its `include_root` folder) of `mirror`
+    /// checks out to, from a fresh tree in `tmp/` that is then removed:
+    /// what a checkout already in the store must hash to when there is no
+    /// locked hash to compare it with. Hashing the store's copy instead
+    /// would record whatever an edit left there as the truth.
+    pub fn fresh_hash(
+        &self,
+        mirror: &Path,
+        commit: &str,
+        include_root: Option<&str>,
+    ) -> Result<String> {
+        self.build(mirror, commit, include_root, None)
+    }
+
+    fn build(
+        &self,
+        mirror: &Path,
+        commit: &str,
+        include_root: Option<&str>,
+        dest: Option<&Path>,
+    ) -> Result<String> {
         let tmp = self.scratch()?;
         let tree = tmp.join("tree");
         let r = (|| {
@@ -205,9 +233,11 @@ impl Store {
             self.git
                 .checkout(mirror, commit, include_root, &tree, &tmp)?;
             let hash = crate::hash::tree_hash(&tree)?;
-            // Renamed first: moving a directory needs it writable.
-            std::fs::rename(&tree, dest).at("create", dest)?;
-            set_tree_readonly(dest);
+            if let Some(dest) = dest {
+                // Renamed first: moving a directory needs it writable.
+                std::fs::rename(&tree, dest).at("create", dest)?;
+                set_tree_readonly(dest);
+            }
             Ok(hash)
         })();
         make_writable(&tmp);
@@ -575,6 +605,23 @@ mod tests {
         assert_eq!(normalize_url("file:///tmp/x/repo"), "file:///tmp/x/repo");
         assert_eq!(label("https://github.com/BelfrySCAD/BOSL2"), "BOSL2");
         assert_eq!(label("git@github.com:a/B"), "B");
+    }
+
+    /// A checkout's name never slices through a character, whatever the
+    /// commit string holds.
+    #[test]
+    fn checkout_names_are_char_safe() {
+        let store = Store {
+            root: PathBuf::from("/s"),
+            git: Git::new(PathBuf::from("/s/empty-gitconfig")),
+        };
+        let wide = "\u{e9}".repeat(20);
+        let p = store.checkout_path("https://h/r", &wide, None);
+        assert_eq!(
+            p.file_name().unwrap().to_string_lossy(),
+            format!("r-{}", "\u{e9}".repeat(12))
+        );
+        assert_eq!(crate::resolve::short(&wide), "\u{e9}".repeat(7));
     }
 
     /// `--store`, then `SCAD_STORE`, then the `NEOSCAD_STORE` alias, then

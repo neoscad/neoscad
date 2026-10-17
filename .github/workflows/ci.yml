@@ -163,7 +163,7 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release -p neoscad-cli
-      # scad-deps: the dependency commands and their links and junctions
+      # scad-deps: the dependency commands and their links (or copies)
       # (its `cli` feature is on through neoscad-cli).
       - run: cargo test --locked --no-fail-fast -p neoscad-cli -p neoscad-lang -p scad-deps
       # agent-link's unit tests (named pipes, discovery). Its tests/link.rs
