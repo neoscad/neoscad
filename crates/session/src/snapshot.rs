@@ -65,6 +65,11 @@ pub struct SnapshotRequest {
     /// fillet`): the call by its index (from 1) or its selector, as
     /// `measure --fillet` takes it.
     pub fillet: Option<String>,
+    /// The unit the model is in, for the sheet's labels (the grid step,
+    /// dimensions and the size line); millimetres by default.
+    pub units: render::snapshot::Units,
+    /// The model alone, for a document: no header, captions, grid or axes.
+    pub clean: bool,
 }
 
 impl SnapshotRequest {
@@ -82,6 +87,8 @@ impl SnapshotRequest {
             issues: None,
             sketch: None,
             fillet: None,
+            units: render::snapshot::Units::Mm,
+            clean: false,
         }
     }
 }
@@ -668,9 +675,10 @@ impl Session {
                 .filter_map(Value::as_f64)
                 .map(number)
                 .collect();
-            let mut line = format!("size {} mm", dims.join(" x "));
+            let unit = req.units.name();
+            let mut line = format!("size {} {unit}", dims.join(" x "));
             if let Some(v) = g.get("volume").and_then(Value::as_f64) {
-                line.push_str(&format!(", volume {} mm3", number(v)));
+                line.push_str(&format!(", volume {} {unit}3", number(v)));
             }
             if let Some(t) = g.get("triangles").and_then(Value::as_u64) {
                 line.push_str(&format!(", {t} triangles"));
@@ -684,7 +692,11 @@ impl Session {
         } else if model.tree.is_some() {
             if let Some((lo, hi)) = scene.bounding_box() {
                 let d: Vec<String> = (0..3).map(|k| number(hi[k] - lo[k])).collect();
-                header.push(format!("preview size {} mm", d.join(" x ")));
+                header.push(format!(
+                    "preview size {} {}",
+                    d.join(" x "),
+                    req.units.name()
+                ));
             }
         } else if req.diff.is_none() && overlay.is_none() {
             header.push("empty: nothing to draw".into());
@@ -707,6 +719,8 @@ impl Session {
             lighting: req.lighting,
             markers,
             sketch: overlay.or(fillet_overlay),
+            units: req.units,
+            clean: req.clean,
         };
         req.run.stage(crate::Stage::Draw);
         let (png, gpu_ms, draw_ms, encode_ms) = self.draw_sheet(&scene, &scheme, &sheet)?;
@@ -730,6 +744,13 @@ impl Session {
             json!(views.iter().map(|v| v.name()).collect::<Vec<_>>()),
         );
         out.insert("size".into(), json!([width, height]));
+        // Only when asked for, so a default summary reads as it always did.
+        if req.units != render::snapshot::Units::Mm {
+            out.insert("units".into(), json!(req.units.name()));
+        }
+        if req.clean {
+            out.insert("clean".into(), json!(true));
+        }
         out.insert(
             "lighting".into(),
             json!(match req.lighting {

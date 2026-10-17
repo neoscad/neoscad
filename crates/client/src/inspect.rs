@@ -144,6 +144,7 @@ impl CheckOptions {
             max_overhang: self.max_overhang,
             bed_tolerance: self.bed_tolerance,
             max_findings: self.max_findings as usize,
+            printability: true,
         })
     }
 }

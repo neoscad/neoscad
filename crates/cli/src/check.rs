@@ -112,6 +112,9 @@ pub fn settings_of(params: &Value) -> Result<CheckSettings, String> {
     if let Some(n) = params.get("max_findings").and_then(Value::as_u64) {
         s.max_findings = n as usize;
     }
+    if let Some(p) = params.get("printability").and_then(Value::as_bool) {
+        s.printability = p;
+    }
     match params.get("bed") {
         None | Some(Value::Null) => {}
         Some(Value::String(b)) => {

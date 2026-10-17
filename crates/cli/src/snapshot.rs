@@ -43,9 +43,19 @@ pub(crate) struct Args {
     #[arg(long, value_name = "WxH", default_value = "1024x1024")]
     size: String,
 
-    /// Annotate the bounding box's size (mm) in every view.
+    /// Annotate the bounding box's size (mm, or `--units`) in every view.
     #[arg(long)]
     dims: bool,
+
+    /// The unit the model is in, for the labels (grid step, dimensions,
+    /// size): mm (the default), in or ft. The drawing is the same.
+    #[arg(long, value_name = "UNIT")]
+    units: Option<String>,
+
+    /// Only the model, for a document: no header, captions, grid or axis
+    /// cross (`--dims` and `--issues` markers are still drawn).
+    #[arg(long)]
+    clean: bool,
 
     /// Draw the rendered geometry (the default).
     #[arg(long, conflicts_with = "preview")]
@@ -127,6 +137,8 @@ pub fn main(args: Vec<OsString>) -> u8 {
         "views": a.views,
         "size": a.size,
         "dims": a.dims,
+        "units": a.units,
+        "clean": a.clean,
         "preview": a.preview,
         "diff": a.diff,
         "lighting": a.lighting,
@@ -192,6 +204,11 @@ pub fn request(
         "openscad" => render::Lighting::OpenScad,
         l => return Err(format!("unknown --lighting '{l}' (headlight or openscad)")),
     };
+    let units = match s("units") {
+        None => render::snapshot::Units::Mm,
+        Some(u) => render::snapshot::Units::parse(u)
+            .ok_or_else(|| format!("unknown --units '{u}' (mm, in or ft)"))?,
+    };
     let output = s("output").map(str::to_string).unwrap_or_else(|| {
         let stem = Path::new(model)
             .file_stem()
@@ -234,6 +251,8 @@ pub fn request(
         issues,
         sketch: s("sketch").map(str::to_string),
         fillet: crate::measure::fillet_param(params),
+        units,
+        clean: b("clean"),
     })
 }
 

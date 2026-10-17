@@ -1,6 +1,7 @@
 //! Contact sheets for `neoscad snapshot`: one PNG with a model drawn from
 //! several standard views, each panel with a scale grid, an axis cross, a
-//! caption, and (optionally) the bounding box's dimensions in mm. Made for
+//! caption, and (optionally) the bounding box's dimensions (in mm, or the
+//! sheet's [`Units`]); a `clean` sheet is the model alone. Made for
 //! agents: a vision model reading one compact image learns the shape, its
 //! orientation and its size, without a GUI.
 //!
@@ -128,6 +129,44 @@ pub struct Sheet {
     /// sheets, so faces turned away from OpenSCAD's fixed light stay
     /// legible.
     pub lighting: crate::Lighting,
+    /// The unit the model is drawn in, for the grid step's and the
+    /// dimensions' labels. A label only: the drawing is the same.
+    pub units: Units,
+    /// For a document: no header, captions, grid or axis cross; only the
+    /// model (with the dimensions and markers asked for) on the background.
+    pub clean: bool,
+}
+
+/// The length unit a sheet's labels name. OpenSCAD has no units; a model
+/// is in millimetres for printing, but an architectural model may be in
+/// inches or feet, and a "grid 50 mm" label on it reads as wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Units {
+    #[default]
+    Mm,
+    In,
+    Ft,
+}
+
+impl Units {
+    /// `mm`, `in` or `ft` (also `inch`, `inches`, `feet`, `foot`).
+    pub fn parse(s: &str) -> Option<Units> {
+        match s.to_ascii_lowercase().as_str() {
+            "mm" => Some(Units::Mm),
+            "in" | "inch" | "inches" => Some(Units::In),
+            "ft" | "foot" | "feet" => Some(Units::Ft),
+            _ => None,
+        }
+    }
+
+    /// The label after a length: `mm`, `in` or `ft`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Units::Mm => "mm",
+            Units::In => "in",
+            Units::Ft => "ft",
+        }
+    }
 }
 
 /// A labelled point in model coordinates, drawn as a numbered disc over
@@ -198,7 +237,11 @@ impl Sheet {
         // further line (`--sketch` adds the glyphs' key), so no header
         // line runs into the panels' captions.
         let lines = self.header.len().max(2) as u32;
-        let header = (HEADER + 18 * (lines - 2)).min(self.height / 4);
+        let header = if self.clean {
+            0
+        } else {
+            (HEADER + 18 * (lines - 2)).min(self.height / 4)
+        };
         Layout {
             header,
             cols,
@@ -225,11 +268,15 @@ impl Sheet {
                 };
                 cam.object_rot = view.object_rot();
                 cam.view_all(bbox);
-                if bbox.is_some() {
-                    // Room around the model for the dimension lines.
+                if bbox.is_some() && (self.dims || !self.clean) {
+                    // Room around the model for the dimension lines (and,
+                    // but on a clean sheet, the captions and grid labels).
                     cam.viewer_distance *= 1.3;
                 }
                 let mut o = Overlay::default();
+                if self.clean {
+                    return (cam, o);
+                }
                 if let Some(b) = bbox {
                     grid(&mut o.before, &cam, view, b);
                 }
@@ -267,37 +314,41 @@ impl Sheet {
                 sketch_overlay(&mut c, cam, s, rect);
             }
             let (title, sub) = view.caption();
-            c.text(
-                &title,
-                x0 as f64 + 8.0,
-                y0 as f64 + 20.0,
-                16.0,
-                Align::Left,
-                INK,
-                true,
-            );
-            c.text(
-                &sub,
-                x0 as f64 + 8.0,
-                y0 as f64 + 38.0,
-                12.0,
-                Align::Left,
-                MUTED,
-                false,
-            );
-            if let Some(b) = bbox {
-                let step = grid_step(cam);
+            if !self.clean {
                 c.text(
-                    &format!("grid {} mm", number(step)),
-                    (x0 + l.panel_w) as f64 - 8.0,
-                    (y0 + l.panel_h) as f64 - 8.0,
+                    &title,
+                    x0 as f64 + 8.0,
+                    y0 as f64 + 20.0,
+                    16.0,
+                    Align::Left,
+                    INK,
+                    true,
+                );
+                c.text(
+                    &sub,
+                    x0 as f64 + 8.0,
+                    y0 as f64 + 38.0,
                     12.0,
-                    Align::Right,
+                    Align::Left,
                     MUTED,
                     false,
                 );
+            }
+            if let Some(b) = bbox {
+                if !self.clean {
+                    let step = grid_step(cam);
+                    c.text(
+                        &format!("grid {} {}", number(step), self.units.name()),
+                        (x0 + l.panel_w) as f64 - 8.0,
+                        (y0 + l.panel_h) as f64 - 8.0,
+                        12.0,
+                        Align::Right,
+                        MUTED,
+                        false,
+                    );
+                }
                 if self.dims {
-                    dimensions(&mut c, cam, *view, b, (x0, y0));
+                    dimensions(&mut c, cam, *view, b, (x0, y0), self.units);
                 }
             }
             // Markers that would cover one another (two findings at one
@@ -355,6 +406,9 @@ impl Sheet {
         for row in 1..l.rows {
             let y = l.header + row * l.panel_h;
             c.line(0.0, y as f64, self.width as f64, y as f64, SEPARATOR);
+        }
+        if self.clean {
+            return c.into_pixels();
         }
         c.line(
             0.0,
@@ -506,15 +560,17 @@ fn dimensions(
     view: View,
     (lo, hi): ([f64; 3], [f64; 3]),
     (x0, y0): (u32, u32),
+    units: Units,
 ) {
     let size: [f64; 3] = std::array::from_fn(|k| hi[k] - lo[k]);
     let (ox, oy) = (f64::from(x0), f64::from(y0));
     let Some(([(h, _), (v, _)], _)) = view.frame() else {
         let text = format!(
-            "{} x {} x {} mm",
+            "{} x {} x {} {}",
             number(size[0]),
             number(size[1]),
-            number(size[2])
+            number(size[2]),
+            units.name()
         );
         // Right-aligned above the grid step's label: centred on the
         // bottom edge, a long size ran into "grid 10 mm" on a narrow
@@ -940,9 +996,68 @@ mod tests {
             markers: vec![],
             sketch: None,
             lighting: crate::Lighting::Headlight,
+            units: Units::Mm,
+            clean: false,
         };
         let l = s.layout();
         assert_eq!((l.cols, l.rows, l.panel_w, l.panel_h), (2, 2, 512, 490));
+        // A clean sheet has no header: the panels fill it.
+        let clean = Sheet { clean: true, ..s };
+        let l = clean.layout();
+        assert_eq!((l.header, l.panel_h), (0, 512));
+    }
+
+    #[test]
+    fn units_parse_and_name_themselves() {
+        assert_eq!(Units::parse("in"), Some(Units::In));
+        assert_eq!(Units::parse("Inches"), Some(Units::In));
+        assert_eq!(Units::parse("feet"), Some(Units::Ft));
+        assert_eq!(Units::parse("mm"), Some(Units::Mm));
+        assert_eq!(Units::parse("cm"), None);
+        assert_eq!(Units::default().name(), "mm");
+        assert_eq!(Units::Ft.name(), "ft");
+    }
+
+    /// A clean sheet draws no grid, axis cross, caption or header: a blank
+    /// panel composes to the plain background, where the default sheet
+    /// has ink in its header and captions.
+    #[test]
+    fn a_clean_sheet_is_only_the_model() {
+        let s = Sheet {
+            views: vec![View::Iso],
+            width: 200,
+            height: 200,
+            dims: false,
+            header: vec!["m.scad - render".into(), "size 1 x 1 x 1 in".into()],
+            legend: vec![],
+            markers: vec![],
+            sketch: None,
+            lighting: crate::Lighting::Headlight,
+            units: Units::In,
+            clean: true,
+        };
+        let bbox = Some(([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]));
+        let views = s.views(bbox, &crate::ColorScheme::cornfield());
+        assert!(views[0].1.before.is_empty() && views[0].1.after.is_empty());
+        let draw = |s: &Sheet| {
+            let l = s.layout();
+            let blank = crate::Image {
+                width: l.panel_w,
+                height: l.panel_h,
+                rgba: vec![255; (l.panel_w * l.panel_h * 4) as usize],
+            };
+            let cams: Vec<Camera> = s
+                .views(bbox, &crate::ColorScheme::cornfield())
+                .iter()
+                .map(|v| v.0)
+                .collect();
+            s.compose(&[blank], &cams, bbox, [255, 255, 255])
+        };
+        assert!(draw(&s).rgba.iter().all(|&b| b == 255));
+        let busy = Sheet { clean: false, ..s };
+        assert!(draw(&busy).rgba.iter().any(|&b| b != 255));
+        let views = busy.views(bbox, &crate::ColorScheme::cornfield());
+        assert!(!views[0].1.before.is_empty());
     }
 
     #[test]
@@ -1015,6 +1130,8 @@ mod tests {
             markers: vec![],
             sketch: Some(overlay),
             lighting: crate::Lighting::Headlight,
+            units: Units::Mm,
+            clean: false,
         };
         // A third header line makes the header taller.
         assert_eq!(sheet.layout().header, HEADER + 18);

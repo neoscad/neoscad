@@ -326,8 +326,11 @@ model), `lighting` (`headlight`, the default, or `openscad`),
 `highlight` ([string]: parts to show in colour, the rest ghosted),
 `issues` (`true` to run `check` with its defaults, or with the check
 parameters given alongside; or an object of check parameters: the
-findings are marked on the sheet) and `sketch` (a constrained sketch's
-name, with `enable: ["sketch"]`: drawn flat with its constraints).
+findings are marked on the sheet), `sketch` (a constrained sketch's
+name, with `enable: ["sketch"]`: drawn flat with its constraints),
+`units` (`mm`, the default, `in` or `ft`: the unit the labels name) and
+`clean` (`true`: the model alone, with no header, captions, grid or
+axes).
 Result: the snapshot summary of `docs/cli-json.md` plus `exit_code`. A
 request the server cannot draw (no GPU, a bad view name) is error -32001 with the
 message.
@@ -336,7 +339,9 @@ message.
 
 Printability checks (`neoscad check`). Params: the common ones, `bed`
 (`"WxDxH"` or `[w, d, h]`, mm), `nozzle`, `min_wall`, `max_overhang`
-(degrees from vertical) and `max_findings`; out of range is error
+(degrees from vertical), `max_findings` and `printability` (`false`:
+only the findings about the geometry, none about printing it;
+`docs/cli-json.md`, "`neoscad check`"); out of range is error
 -32602. Result: the check object of `docs/cli-json.md` ("`neoscad
 check`"), whose `exit_code` is 1 when a finding is an error. Publishes
 the document's diagnostics.

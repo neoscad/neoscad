@@ -169,6 +169,11 @@ else is the same for the same input.
   comparison (`--diff`); `sketch` one constrained sketch drawn flat
   (`--sketch NAME`).
 - `views` and `size`: the panels in order and the sheet's pixel size.
+- `units` (only with `--units in` or `ft`): the unit the sheet's labels
+  name (the grid step, the dimensions, the size line); the numbers are
+  the model's own either way. `clean` (only with `--clean`): `true`,
+  the sheet is the model alone, with no header, captions, grid or axis
+  cross, for a document.
 - `lighting`: `headlight` (the default: one light at the camera, so no
   visible face is drawn near black) or `openscad` (`--lighting openscad`:
   OpenSCAD's two fixed lights, as PNG export draws). See
@@ -512,11 +517,22 @@ no bed (the bed-fit check runs only with `--bed`), `bed_tolerance` 0.05
 mm (how far above the lowest point a piece may start and still count
 as on the bed), at most 10 findings per code.
 
+`printability: false` (a request parameter of `neoscad serve`'s and
+the MCP server's `check`; `settings.printability`) leaves out the
+findings about printing the model: `floating`, `tiny-feature`,
+`off-bed`, `bed-fit`, `thin-wall`, `overhang`, `cavity` and
+`touching-surfaces` (`session::check::PRINTING_CODES`). What remains is
+about the geometry itself (`not-manifold`, `part-not-manifold`, the
+input meshes', `parts-intersect`, `cut-away`, `cuts-nothing`, `empty`,
+`not-3d`, `stl-precision`), for a model that is not printed: an
+assembly drawn in inches, whose boards are separate pieces and whose
+plywood is thinner than a printed wall.
+
 ```json
 {"schema": 1, "input": "model.scad", "ok": bool, "exit_code": 0|1,
  "settings": {"bed": [w, d, h]|null, "nozzle": 0.4, "min_wall": 0.8,
               "max_overhang": 45.0, "bed_tolerance": 0.05,
-              "max_findings": 10},
+              "max_findings": 10, "printability": true},
  "model": MODEL, "parts": [PART, ...],
  "counts": {"errors": int, "warnings": int, "info": int, "fillet_errors": int},
  "findings": [FINDING, ...], "truncated": {"code": int, ...},
@@ -1136,3 +1152,6 @@ have them.
   wrote the sharp part as a success. `neoscad serve`'s `export` adds
   `written` and `fillet_errors` (`docs/serve-protocol.md`). Not
   additive for a script that relied on the served exit code.
+- Unreleased: `check`'s `settings.printability` (`printability: false`
+  leaves out the printing findings), and the snapshot's `units` and
+  `clean` (`neoscad snapshot --units in|ft`, `--clean`). Additive.

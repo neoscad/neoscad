@@ -71,7 +71,27 @@ pub struct CheckSettings {
     pub bed_tolerance: f64,
     /// Findings reported per code; the rest are counted in `truncated`.
     pub max_findings: usize,
+    /// Report the 3D-printing findings ([`PRINTING_CODES`]). Off for a
+    /// model that is not printed (an architectural assembly, a jig drawn
+    /// in inches): only the findings about the geometry itself remain
+    /// (manifold, input meshes, intersecting parts, cuts).
+    pub printability: bool,
 }
+
+/// The findings that are about printing the model rather than about its
+/// geometry: [`CheckSettings::printability`] off leaves them out. A shed's
+/// boards are separate pieces (`floating`), thin plywood is thinner than
+/// a printed wall (`thin-wall`), a roof overhangs and stands off the bed.
+pub const PRINTING_CODES: &[&str] = &[
+    "floating",
+    "tiny-feature",
+    "off-bed",
+    "bed-fit",
+    "thin-wall",
+    "overhang",
+    "cavity",
+    "touching-surfaces",
+];
 
 impl Default for CheckSettings {
     fn default() -> Self {
@@ -82,6 +102,7 @@ impl Default for CheckSettings {
             max_overhang: 45.0,
             bed_tolerance: 0.05,
             max_findings: 10,
+            printability: true,
         }
     }
 }
@@ -95,6 +116,7 @@ impl CheckSettings {
             "max_overhang": self.max_overhang,
             "bed_tolerance": self.bed_tolerance,
             "max_findings": self.max_findings,
+            "printability": self.printability,
         })
     }
 }
@@ -810,6 +832,9 @@ fn analyze_solid(
     // Problems of the input meshes first (the cause comes before the
     // effects it has on the result), then errors, then in check order;
     // truncate per code.
+    if !s.printability {
+        out.retain(|f| !PRINTING_CODES.contains(&f.code));
+    }
     out.sort_by_key(|f| (!f.code.starts_with("polyhedron-"), f.level));
     for f in &out {
         a.counts[f.level as usize] += 1;
