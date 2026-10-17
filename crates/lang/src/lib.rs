@@ -31,6 +31,7 @@ pub mod host;
 pub mod loader;
 pub mod number;
 pub mod paths;
+pub mod project;
 pub mod source;
 pub mod syntax;
 pub mod vfs;

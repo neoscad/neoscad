@@ -106,6 +106,11 @@ pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 /// Hands memory the process freed back to the system, so that the next
 /// [`MemoryProbe`] reading shows it ([`Config::memory_release`]).
 pub type MemoryRelease = Arc<dyn Fn() + Send + Sync>;
+/// The project a main file belongs to, if any: the directories its
+/// dependencies add to the library path for that file
+/// ([`Config::project`]). The host finds it (the nearest `scad.toml` above
+/// the file; `docs/dependencies.md`).
+pub type ProjectResolver = Arc<dyn Fn(&Path) -> Option<lang::project::ProjectLibs> + Send + Sync>;
 /// Opens (once) the GPU snapshots draw on.
 #[cfg(feature = "gpu")]
 pub type GpuProvider =
@@ -117,6 +122,10 @@ pub struct Config {
     /// The host's files; open documents' buffers are served over them.
     pub fs: Arc<dyn FileSystem + Send + Sync>,
     pub libs: LibraryPath,
+    /// A main file's project directories, searched after the including
+    /// file's directory and before [`Config::libs`]. None (the default)
+    /// adds nothing, as OpenSCAD does.
+    pub project: Option<ProjectResolver>,
     pub fonts: FontProvider,
     /// Where relative inputs are found and messages are relative to,
     /// unless a request says otherwise ([`Run::cwd`]).
@@ -186,6 +195,7 @@ impl Config {
         Config {
             fs,
             libs,
+            project: None,
             fonts: Arc::new(move |used: &[String]| {
                 let mut db = text::FontDb::with_fs(font_fs.clone());
                 for u in used {
@@ -999,6 +1009,16 @@ impl Session {
         &self.cfg
     }
 
+    /// The library path for `main` (an absolute path): the project's
+    /// directories ([`Config::project`]) in front of [`Config::libs`],
+    /// and the project, for its hints.
+    pub fn libs_for(&self, main: &Path) -> (LibraryPath, Option<lang::project::ProjectLibs>) {
+        match self.cfg.project.as_ref().and_then(|f| f(main)) {
+            Some(p) => (p.library_path(&self.cfg.libs), Some(p)),
+            None => (self.cfg.libs.clone(), None),
+        }
+    }
+
     fn stores(&self) -> parse::Stores<'_> {
         parse::Stores {
             lexed: &self.lexed,
@@ -1508,8 +1528,10 @@ impl Session {
         run.stage(Stage::Parse);
         let t = self.now();
         let recorder = pipe.fs.clone();
-        let (fs, libs) = (&*recorder, &self.cfg.libs);
         let paths = pipe.paths.clone();
+        let (libs, project) = self.libs_for(&paths.path);
+        let (fs, libs) = (&*recorder, &libs);
+        let salt = project.as_ref().map_or(0, |p| p.stamp);
         let read = match &run.text {
             Some(t) => Ok(t.to_vec()),
             None => fs.read(&paths.path),
@@ -1531,7 +1553,15 @@ impl Session {
         text.extend_from_slice(&suffix);
         let epoch_text = hash_of(&text);
         let program = match &run.entry {
-            None => parse::main_program(&self.parse, self.stores(), &paths.path, text, fs, libs),
+            None => parse::main_program(
+                &self.parse,
+                self.stores(),
+                &paths.path,
+                text,
+                fs,
+                libs,
+                salt,
+            ),
             Some(entry) => {
                 // Not through the parse cache: the program is changed.
                 let mut p = lang::parse_program_with(
@@ -1546,7 +1576,10 @@ impl Session {
             }
         };
         for d in program.openscad_diags() {
-            pipe.con.diagnostic(d, &program.sources, &paths.cwd);
+            match project.as_ref().and_then(|p| p.annotate(d)) {
+                Some(d) => pipe.con.diagnostic(&d, &program.sources, &paths.cwd),
+                None => pipe.con.diagnostic(d, &program.sources, &paths.cwd),
+            }
         }
         if program.has_syntax_errors() {
             pipe.con.print(
@@ -1561,7 +1594,10 @@ impl Session {
             match (&lib.program, lib.open_error()) {
                 (Some(p), _) => {
                     for d in p.openscad_diags() {
-                        pipe.con.diagnostic(d, &p.sources, &paths.cwd);
+                        match project.as_ref().and_then(|pr| pr.annotate(d)) {
+                            Some(d) => pipe.con.diagnostic(&d, &p.sources, &paths.cwd),
+                            None => pipe.con.diagnostic(d, &p.sources, &paths.cwd),
+                        }
                     }
                 }
                 (None, Some(msg)) => pipe.con.print(Some(Severity::Warning), msg.as_bytes()),

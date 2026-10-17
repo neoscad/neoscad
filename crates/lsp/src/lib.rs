@@ -673,7 +673,7 @@ impl Server {
             session,
             world,
             uri: uri.to_string(),
-            libs: session.config().libs.0.clone(),
+            libs: session.libs_for(&doc.path).0.0,
             uris,
             sketches,
         })
@@ -682,7 +682,24 @@ impl Server {
     /// The program of `doc`, rebuilt only when a file it read changed.
     fn world(&self, session: &Session, doc: &Doc, open: &HashMap<PathBuf, Arc<Doc>>) -> Arc<World> {
         let fs = session.fs();
+        // The document's library path, its project's included
+        // (`session::Config::project`): stamped as the empty path, so a
+        // fetch that relinks a dependency rebuilds the world.
+        let (libs, project) = session.libs_for(&doc.path);
+        let libs_stamp = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            libs.0.hash(&mut h);
+            project.map(|p| p.stamp).hash(&mut h);
+            Metadata {
+                modified: Some(i128::from(h.finish())),
+                len: 0,
+            }
+        };
         let stamp = |p: &Path| -> Option<Metadata> {
+            if p.as_os_str().is_empty() {
+                return Some(libs_stamp);
+            }
             match open.get(p) {
                 // An open document's version stands in for its metadata.
                 Some(d) => Some(Metadata {
@@ -707,7 +724,7 @@ impl Server {
         }
         let loader = world::Loader {
             fs: &*fs,
-            libs: &session.config().libs,
+            libs: &libs,
             cache: &self.cache,
             open: &|p: &Path| {
                 open.get(p)
@@ -720,12 +737,14 @@ impl Server {
         w.query = query;
         w.fillet = fillet;
         let w = Arc::new(w);
-        let stamps = w
-            .files
-            .iter()
-            .skip(1)
-            .chain(w.libs.iter().flatten())
-            .map(|f| (f.path.clone(), stamp(&f.path)))
+        let stamps = std::iter::once((PathBuf::new(), Some(libs_stamp)))
+            .chain(
+                w.files
+                    .iter()
+                    .skip(1)
+                    .chain(w.libs.iter().flatten())
+                    .map(|f| (f.path.clone(), stamp(&f.path))),
+            )
             .collect();
         *slot = Some((w.clone(), stamps));
         w
@@ -813,8 +832,13 @@ impl Server {
             Some(Arc::new(SourceFile::new(p.to_path_buf(), t)))
         };
         let uri_for = |p: &Path| uris.get(p).cloned().unwrap_or_else(|| uri::from_path(p));
-        let mut per_uri =
-            diagnose::convert(&world, &session.config().libs.0, diags, &text_of, &uri_for);
+        let mut per_uri = diagnose::convert(
+            &world,
+            &session.libs_for(&doc.path).0.0,
+            diags,
+            &text_of,
+            &uri_for,
+        );
         let mut out = Vec::new();
         let mut st = self.state();
         // "Pin drawing" on the sketch's own diagnostics, from the run of

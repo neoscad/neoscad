@@ -648,3 +648,45 @@ fn a_used_files_top_level_fn_is_named_at_the_call() {
     );
     assert!(hints("e.scad").is_empty());
 }
+
+/// A project's directories (`Config::project`) come after the including
+/// file's own and before the host's library path, per main file, and a
+/// warm session follows the project when its answer changes (after a
+/// fetch relinks a dependency).
+#[test]
+fn a_project_puts_its_libraries_first() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let fs = Arc::new(MemFs::new());
+    fs.insert("/doc/main.scad", b"include <Lib/x.scad>\nx();\n".to_vec());
+    fs.insert("/lib/Lib/x.scad", b"module x() cube(1);\n".to_vec());
+    fs.insert(
+        "/doc/.scad/v2/Lib/x.scad",
+        b"module x() cube(2);\n".to_vec(),
+    );
+    fs.insert(
+        "/doc/.scad/v3/Lib/x.scad",
+        b"module x() cube(3);\n".to_vec(),
+    );
+    let which = Arc::new(AtomicU64::new(0));
+    let w = which.clone();
+    let mut cfg = Config::new(fs.clone(), LibraryPath(vec![PathBuf::from("/lib")]));
+    cfg.work_dir = PathBuf::from("/doc");
+    cfg.project = Some(Arc::new(move |main: &Path| {
+        let v = w.load(Ordering::SeqCst);
+        (main.starts_with("/doc") && v > 0).then(|| lang::project::ProjectLibs {
+            root: "/doc".into(),
+            dirs: vec![PathBuf::from(format!("/doc/.scad/v{v}"))],
+            declared: Vec::new(),
+            stamp: v,
+        })
+    }));
+    let s = Session::new(cfg.clone());
+    assert!((volume(&s, "main.scad") - 1.0).abs() < 1e-9);
+    which.store(2, Ordering::SeqCst);
+    assert!((volume(&s, "main.scad") - 8.0).abs() < 1e-9);
+    which.store(3, Ordering::SeqCst);
+    assert!((volume(&s, "main.scad") - 27.0).abs() < 1e-9);
+    // The file's own directory still comes first.
+    fs.insert("/doc/Lib/x.scad", b"module x() cube(4);\n".to_vec());
+    assert!((volume(&Session::new(cfg), "main.scad") - 64.0).abs() < 1e-9);
+}

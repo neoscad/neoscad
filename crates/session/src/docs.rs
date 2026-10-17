@@ -138,7 +138,21 @@ impl Session {
         // relative to the working directory after all. `/`-separated on
         // every host, as OpenSCAD prints relative paths, so an index reads
         // (and is asked about) the same on Windows.
+        // A project's dependencies (`Config::project`) count as library
+        // directories, ahead of the working directory they are usually
+        // under (`.scad/libraries`).
+        let project_dirs = req
+            .file
+            .as_ref()
+            .and_then(|f| self.libs_for(&crate::normal(&cwd.join(f))).1)
+            .map(|p| p.dirs)
+            .unwrap_or_default();
         let rel = |p: &Path| {
+            for dir in &project_dirs {
+                if let Ok(r) = p.strip_prefix(crate::normal(&cwd.join(dir))) {
+                    return lang::loader::generic(r);
+                }
+            }
             if let Ok(r) = p.strip_prefix(&cwd) {
                 return lang::loader::generic(r);
             }
@@ -294,8 +308,9 @@ impl Session {
     /// The definitions of a file, its includes and the libraries it
     /// `use`s (one level: their own `use`s are not followed).
     fn user_docs(&self, path: &Path) -> Result<Vec<UserDoc>, String> {
-        let (fs, libs) = (&*self.fs, &self.cfg.libs);
         let path = crate::normal(path);
+        let libs = self.libs_for(&path).0;
+        let (fs, libs) = (&*self.fs, &libs);
         let text = fs
             .read(&path)
             .map_err(|e| format!("cannot read '{}': {e}", path.display()))?;

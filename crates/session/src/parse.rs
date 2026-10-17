@@ -439,8 +439,23 @@ pub fn main_program(
     text: Vec<u8>,
     fs: &dyn FileSystem,
     libs: &LibraryPath,
+    salt: u64,
 ) -> Arc<Program> {
-    let k = key(&[b"main", generic(path).as_bytes(), &text]);
+    // The library path is in the key: two projects (`Config::project`)
+    // resolve one file's includes differently, and `salt` changes when a
+    // project's links do.
+    let mut dirs = Vec::new();
+    for d in &libs.0 {
+        dirs.extend_from_slice(generic(d).as_bytes());
+        dirs.push(0);
+    }
+    let k = key(&[
+        b"main",
+        generic(path).as_bytes(),
+        &text,
+        &dirs,
+        &salt.to_le_bytes(),
+    ]);
     if let Some(p) = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
