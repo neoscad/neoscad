@@ -22,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static var instance: AppDelegate?
 
     static func main() {
+        // `Contents/MacOS/NeoSCAD --help` (or `--version`) is the command
+        // line's, not a window's: hand over to the bundled `neoscad`
+        // before AppKit starts (App/Agents/CommandLineTool.swift).
+        CommandLineTool.handOffIfAsked()
         let app = NSApplication.shared
         let delegate = AppDelegate()
         instance = delegate

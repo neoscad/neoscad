@@ -41,6 +41,41 @@ struct CommandLineToolTests {
         #expect(version.hasPrefix("neoscad "), "\(version)")
     }
 
+    /// Only `--help`, `-h`, `--version` or `-V` as the first argument ask
+    /// the app's binary for the command line; a launch with a document, or
+    /// Xcode's and LaunchServices' own arguments, opens the app as before.
+    @Test func onlyHelpAndVersionAskForTheCommandLine() {
+        let app = "/Applications/NeoSCAD.app/Contents/MacOS/NeoSCAD"
+        #expect(CommandLineTool.wantsCommandLine([app, "--help"]))
+        #expect(CommandLineTool.wantsCommandLine([app, "-h"]))
+        #expect(CommandLineTool.wantsCommandLine([app, "--version"]))
+        #expect(CommandLineTool.wantsCommandLine([app, "-V"]))
+        #expect(!CommandLineTool.wantsCommandLine([app]))
+        #expect(!CommandLineTool.wantsCommandLine([app, "model.scad"]))
+        #expect(!CommandLineTool.wantsCommandLine([app, "-psn_0_12345"]))
+        #expect(!CommandLineTool.wantsCommandLine([app, "-NSDocumentRevisionsDebugMode", "YES"]))
+        #expect(!CommandLineTool.wantsCommandLine([app, "model.scad", "--help"]))
+    }
+
+    /// The app's own binary with `--version` prints the CLI's version and
+    /// exits, opening no window.
+    @Test func theAppBinaryHandsHelpToTheCLI() throws {
+        let app = try #require(Bundle.main.executableURL)
+        let p = Process()
+        p.executableURL = app
+        p.arguments = ["--version"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        // Were it to open the app instead, it would never exit.
+        let deadline = Date().addingTimeInterval(20)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate() }
+        let version = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        #expect(version.hasPrefix("neoscad "), "\(version)")
+    }
+
     @Test func linkIsMadeThenKeptThenMoved() throws {
         let dir = try scratch()
         defer { try? FileManager.default.removeItem(at: dir) }

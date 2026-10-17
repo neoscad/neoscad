@@ -132,4 +132,43 @@ enum CommandLineTool {
             }
         }
     }
+
+    // MARK: The app binary run as a command
+
+    /// The first arguments that ask the app's own binary
+    /// (`NeoSCAD.app/Contents/MacOS/NeoSCAD`) for the command line rather
+    /// than the app: an agent looking for the CLI ran
+    /// `Contents/MacOS/NeoSCAD --help`, which opened a window and never
+    /// returned. Only these exact first arguments: Finder, `open` and Xcode
+    /// launch the app with none of them (or with `-psn_…`, `-NS…` and
+    /// document paths), so a normal launch is unchanged.
+    static let commandLineFlags: Set<String> = ["--help", "-h", "--version", "-V"]
+
+    /// Whether `arguments` (as `CommandLine.arguments`, the program first)
+    /// ask for the command line.
+    static func wantsCommandLine(_ arguments: [String]) -> Bool {
+        arguments.count >= 2 && commandLineFlags.contains(arguments[1])
+    }
+
+    /// Run the bundled CLI in place of the app, with the same arguments,
+    /// when `arguments` ask for it (`wantsCommandLine`): `--help` then
+    /// prints `neoscad`'s help and exits, as `--version` its version. Does
+    /// not return when it hands over; returns when the arguments are an
+    /// ordinary launch. Without a bundled tool (a build that has none) it
+    /// says so on stderr and exits 1, rather than opening the app.
+    static func handOffIfAsked(_ arguments: [String] = CommandLine.arguments, bundle: Bundle = .main) {
+        guard wantsCommandLine(arguments) else { return }
+        guard let tool = bundledTool(in: bundle) else {
+            FileHandle.standardError.write(
+                Data("NeoSCAD: this is the app; this build carries no command-line tool (Contents/Helpers/neoscad)\n".utf8))
+            exit(1)
+        }
+        let argv: [UnsafeMutablePointer<CChar>?] =
+            ([tool.path] + arguments.dropFirst()).map { strdup($0) } + [nil]
+        execv(tool.path, argv)
+        // Only reached when exec failed.
+        FileHandle.standardError.write(
+            Data("NeoSCAD: could not run \(tool.path): \(String(cString: strerror(errno)))\n".utf8))
+        exit(1)
+    }
 }
