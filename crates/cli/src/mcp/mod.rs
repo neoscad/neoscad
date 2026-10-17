@@ -291,6 +291,11 @@ pub fn main(args: Vec<OsString>) -> u8 {
     // rooted file system.
     let open = crate::host::Host::from_env();
     let mut read: Vec<PathBuf> = open.libs.0.clone();
+    // A project's dependencies are links into the shared store
+    // (`docs/dependencies.md`): readable like any library directory.
+    if let Ok(store) = project::store::locate(None) {
+        read.push(store);
+    }
     for f in open.font_sources() {
         if let crate::host::FontSource::Dir(d) = f {
             read.push(d);

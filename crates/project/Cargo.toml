@@ -1,0 +1,30 @@
+[package]
+name = "neoscad-project"
+description = "Project dependencies (a host crate): scad.toml and scad.lock, resolution, the per-machine store of git mirrors and read-only checkouts, the project's library links, and the search path they give a main file (docs/dependencies.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "project"
+
+[dependencies]
+# Reading scad.toml, scad.lock and the store's project index. Already in
+# the build (UniFFI's askama reads its templates' config with it); small,
+# serde-based, MIT OR Apache-2.0. The lockfile and the index are written
+# here by hand, so their bytes are this crate's to keep stable.
+basic-toml = "0.1.10"
+# The platform cache directory the store lives in by default. Already in
+# the build (lang's Windows Documents folder, agent-link).
+dirs = "7"
+# `ProjectLibs`, what a project adds to a main file's library path; pure
+# data, so no `host` feature.
+lang = { package = "neoscad-lang", path = "../lang" }
+serde.workspace = true
+# The content hash of a checkout (src/hash.rs).
+sha2.workspace = true
+
+[lints]
+workspace = true

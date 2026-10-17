@@ -58,6 +58,9 @@ lsp = { package = "neoscad-lsp", path = "../lsp" }
 render = { package = "neoscad-render", path = "../render" }
 serde_json.workspace = true
 session = { package = "neoscad-session", path = "../session" }
+# A document's project dependencies on its library path (`host.rs`;
+# docs/dependencies.md): reads scad.toml and the project's links, no git.
+project = { package = "neoscad-project", path = "../project" }
 text = { package = "neoscad-text", path = "../text" }
 # The app binary's global allocator, as for `neoscad` and the macOS
 # app's core.

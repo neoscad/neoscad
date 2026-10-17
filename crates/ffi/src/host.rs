@@ -34,6 +34,9 @@ pub fn config(resource_dir: Option<&str>) -> session::Config {
     libs.0.push(root.clone());
     let fs: Arc<dyn FileSystem + Send + Sync> = Arc::new(assets::libraries(Arc::new(StdFs), root));
     let mut cfg = session::Config::new(fs.clone(), libs);
+    // A document's project (the nearest scad.toml above it) puts its
+    // fetched dependencies before OPENSCADPATH (docs/dependencies.md).
+    cfg.project = Some(Arc::new(|main: &Path| project::search::project_for(main)));
     let home_fonts = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fonts"));
     cfg.fonts = Arc::new(move |used: &[String]| {
         let mut db = text::FontDb::with_fs(fs.clone());

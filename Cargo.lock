@@ -1518,6 +1518,7 @@ dependencies = [
  "neoscad-io",
  "neoscad-lang",
  "neoscad-lsp",
+ "neoscad-project",
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",
@@ -1596,6 +1597,7 @@ dependencies = [
  "neoscad-eval",
  "neoscad-lang",
  "neoscad-lsp",
+ "neoscad-project",
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",
@@ -1666,6 +1668,7 @@ dependencies = [
  "neoscad-eval",
  "neoscad-lang",
  "neoscad-lsp",
+ "neoscad-project",
  "neoscad-render",
  "neoscad-session",
  "neoscad-text",
@@ -1684,6 +1687,17 @@ dependencies = [
  "neoscad-render",
  "neoscad-session",
  "serde_json",
+]
+
+[[package]]
+name = "neoscad-project"
+version = "0.6.2"
+dependencies = [
+ "basic-toml",
+ "dirs",
+ "neoscad-lang",
+ "serde",
+ "sha2",
 ]
 
 [[package]]

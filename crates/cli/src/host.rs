@@ -130,6 +130,7 @@ impl Host {
     /// `seed` is the seed of unseeded `rands()`.
     pub fn session_config(&self, seed: u32) -> session::Config {
         let mut cfg = session::Config::new(self.fs.clone(), self.libs.clone());
+        cfg.project = Some(project_resolver());
         let host = self.clone();
         cfg.fonts = Arc::new(move |used: &[String]| host.fonts(used.iter()));
         cfg.work_dir = std::env::current_dir().unwrap_or_default();
@@ -144,6 +145,13 @@ impl Host {
         cfg.gpu = Some(Arc::new(crate::png::offscreen));
         cfg
     }
+}
+
+/// The project a main file belongs to (the nearest `scad.toml` above it):
+/// its `.scad/libraries` and `[paths]` go in front of the library path
+/// (`docs/dependencies.md`).
+pub fn project_resolver() -> session::ProjectResolver {
+    Arc::new(|main: &Path| project::search::project_for(main))
 }
 
 /// One place fonts come from.
