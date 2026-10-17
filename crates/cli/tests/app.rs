@@ -224,8 +224,10 @@ impl Mcp {
         for (k, v) in env {
             cmd.env(k, v);
         }
+        // `--no-temp`: these tests' folders are in the temp directory,
+        // and what they keep out of the roots must stay out.
         let mut child = cmd
-            .arg("mcp")
+            .args(["mcp", "--no-temp"])
             .current_dir(cwd)
             .env("NEOSCAD_AGENT_DIR", rendezvous)
             .env_remove("OPENSCADPATH")

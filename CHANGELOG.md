@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Agents can model things that are not printed.** MCP `check` takes
+  `printability: false`: the 3D-printing findings (floating pieces, thin
+  walls, overhangs, off the bed, bed fit, cavities, touching surfaces)
+  are left out and the geometry's own (manifold, intersecting parts,
+  cuts) stay, so an assembly in inches no longer fails for its boards.
+  `snapshot` takes `units` (`mm`, `in`, `ft`) for its labels and text,
+  and `clean` for the model alone, without header, grid or axes, ready
+  for a document; `neoscad snapshot` has `--units` and `--clean`.
+- **Every echo line in a file.** MCP `render` and `check` with `export`
+  to a `.echo` path write the whole echo log there and keep it out of
+  the result, which says how many lines it holds. A result that shows
+  only the first 20 lines now says how many more there are, in `check`,
+  `snapshot` and `measure` too.
+- **Extensions per call.** Every MCP model tool takes `enable` (`sketch`,
+  `fillet`, `query`, `exact`, `part`, or OpenSCAD's experimental
+  features), on top of the server's `--enable`.
+- **Scratch files in the temp directory.** `neoscad mcp` allows the
+  user's temp directory, and the user's own private folders directly in
+  `/tmp` (as Claude Code's scratch folder is), besides its roots;
+  `--no-temp` turns that off (`docs/mcp.md`, "Safety").
+
+### Changed
+
+- On macOS, `NeoSCAD.app/Contents/MacOS/NeoSCAD --help` (or
+  `--version`) prints the command line's help (or version) and exits
+  instead of opening the app, and an app's MCP server names its CLI,
+  `Contents/Helpers/neoscad`, in its instructions.
+
 ## 0.6.2
 
 ### Fixed

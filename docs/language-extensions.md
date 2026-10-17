@@ -1257,9 +1257,9 @@ resolution (`world.rs`), the MCP tools, `client`/`ffi` and the apps, and
 - **MCP.** `measure` takes `sketch`; `check`'s structured content lists
   the sketches (name, status, DOF, unknowns, codes, line). The sketch
   recipe (`crates/cli/src/mcp/recipe_sketch.scad`) is not in the
-  instructions: with the printing recipes they are 2,038 of Claude
-  Code's 2,048 characters, and a server without the extension should not
-  steer agents to `sketch()`. With `--enable sketch`, `docs` for
+  instructions: with the printing recipes they are near Claude Code's
+  2,048 characters, and a server without the extension should not steer
+  agents to `sketch()` (a call can turn it on with `enable: ["sketch"]`). With `--enable sketch`, `docs` for
   `sketch` ends with it, the index says so in a line, and
   `neoscad://recipes` appends it.
 - **Apps' setting.** The macOS app has Settings > Language >

@@ -11,6 +11,12 @@
 //! could read any file on the machine (`import("/etc/passwd")` fails to
 //! parse, but its error text may quote the file).
 //!
+//! The user's temp directory is a root too (unless `--no-temp`), and so is
+//! a private folder of the user's directly in a shared temp directory
+//! (`/tmp/claude-<uid>`, mode 0700): agents are told to keep scratch files
+//! in a temp directory, and exporting there was refused. See
+//! [`Roots::with_temp`].
+//!
 //! A connected NeoSCAD app adds one readable directory per open document:
 //! the document's own, so the model tools run it under its real path and
 //! its includes resolve (docs/agent-bridge.md, "Desktop apps"). The user
@@ -36,6 +42,13 @@ pub struct Roots {
     cwd_refused: Option<(PathBuf, &'static str)>,
     /// Read only (libraries, fonts), canonical.
     read: Vec<PathBuf>,
+    /// Read and write: the user's temp directory, canonical
+    /// ([`Roots::with_temp`]). Never where relative paths resolve.
+    temp: Vec<PathBuf>,
+    /// Shared temp directories (`/tmp`), canonical: a folder directly in
+    /// one is read and write when it is the user's own and private
+    /// ([`private_folder`]).
+    private_in: Vec<PathBuf>,
     /// Read only: the directories of a connected app's open documents,
     /// canonical. Shared by every clone (the tools' and the file
     /// system's), and replaced whenever the app's documents change.
@@ -63,6 +76,8 @@ impl Roots {
             base: write.first().cloned().unwrap_or_else(|| PathBuf::from("/")),
             write,
             read: canon(read),
+            temp: Vec::new(),
+            private_in: Vec::new(),
             cwd_refused: None,
             documents: Arc::default(),
         }
@@ -81,6 +96,46 @@ impl Roots {
         }
         self.cwd_refused = Some((cwd.to_path_buf(), why));
         self
+    }
+
+    /// Allow the temp directories too: each of `temp` (the user's own,
+    /// `$TMPDIR`: per user on macOS, `/var/folders/.../T`) and its
+    /// subfolders, and in each of `shared` (`/tmp`, `/var/tmp`: every user
+    /// writes there) a folder only when it is directly in it, a real
+    /// directory, the user's own and not writable by group or others
+    /// ([`private_folder`]): Claude Code keeps its scratch files in
+    /// `/tmp/claude-<uid>`, mode 0700. No one else can plant a file or a
+    /// link in such a folder, and a link that leads out of it is judged by
+    /// where it leads, as everywhere ([`resolve`]). Directories that do
+    /// not exist are dropped. The working directory's base and the
+    /// refusals' advice do not change.
+    pub fn with_temp(mut self, temp: &[PathBuf], shared: &[PathBuf]) -> Roots {
+        let canon = |v: &[PathBuf]| -> Vec<PathBuf> {
+            let mut out: Vec<PathBuf> = v
+                .iter()
+                .filter_map(|p| p.canonicalize().ok().map(lang::paths::plain))
+                .collect();
+            out.sort();
+            out.dedup();
+            out
+        };
+        self.temp = canon(temp);
+        self.private_in = canon(shared);
+        self
+    }
+
+    /// `r` (resolved) is in a temp directory allowed by [`Roots::with_temp`].
+    fn in_temp(&self, r: &Path) -> bool {
+        self.temp.iter().any(|d| r.starts_with(d))
+            || self.private_in.iter().any(|d| {
+                r.strip_prefix(d)
+                    .ok()
+                    .and_then(|rest| rest.components().next())
+                    .is_some_and(|c| match c {
+                        Component::Normal(n) => private_folder(&d.join(n)),
+                        _ => false,
+                    })
+            })
     }
 
     /// The directories of the connected apps' open documents, readable
@@ -120,6 +175,7 @@ impl Roots {
             .iter()
             .chain(&self.read)
             .any(|d| r.starts_with(d))
+            || self.in_temp(&r)
             || self
                 .documents
                 .read()
@@ -132,13 +188,42 @@ impl Roots {
     /// ([`resolve`]), dangling links included.
     pub fn can_write(&self, p: &Path) -> bool {
         let r = resolve(p);
-        !r.as_os_str().is_empty() && self.write.iter().any(|d| r.starts_with(d))
+        !r.as_os_str().is_empty()
+            && (self.write.iter().any(|d| r.starts_with(d)) || self.in_temp(&r))
     }
 
     /// Why `p` was refused, for the agent: which roots there are and how
     /// to add one.
     pub fn refusal(&self, what: &str, p: &Path) -> String {
-        let roots: Vec<String> = self.write.iter().map(|d| d.display().to_string()).collect();
+        let mut roots: Vec<String> = self.write.iter().map(|d| d.display().to_string()).collect();
+        let named = roots.len();
+        roots.extend(
+            self.temp
+                .iter()
+                .map(|d| format!("the temp directory {}", d.display())),
+        );
+        roots.extend(
+            self.private_in
+                .iter()
+                .map(|d| format!("your own private folders in {}", d.display())),
+        );
+        let roots = if named == 0 && !roots.is_empty() {
+            // The temp directories alone are no project root: the
+            // refusal's advice to add one stays.
+            match &self.cwd_refused {
+                Some((cwd, why)) => {
+                    return format!(
+                        "{what} '{}' is outside the allowed roots ({}; not the working directory {}, {why}). Add `--root DIR` to the server's arguments (\"args\": [\"mcp\", \"--root\", \"/path/to/models\"]) for another directory",
+                        p.display(),
+                        roots.join(", "),
+                        cwd.display(),
+                    );
+                }
+                None => roots,
+            }
+        } else {
+            roots
+        };
         match &self.cwd_refused {
             Some((cwd, why)) if roots.is_empty() => format!(
                 "{what} '{}' is outside the allowed roots: there are none. neoscad mcp started in {} ({why}), which is never a root (some clients, Claude Desktop among them, start servers in `/`). Add `--root DIR` to the server's arguments (\"args\": [\"mcp\", \"--root\", \"/path/to/models\"]); inline `source` works without one",
@@ -157,6 +242,27 @@ impl Roots {
                 roots.join(", ")
             ),
         }
+    }
+}
+
+/// `dir` is a folder of this user's that no one else can write in: a real
+/// directory (not a link), owned by this user, and not writable
+/// by its group or others. Never on Windows, whose temp directory is the
+/// user's own already.
+fn private_folder(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(dir).is_ok_and(|m| {
+            m.file_type().is_dir()
+                && m.uid() == agent_link::transport::uid()
+                && m.mode() & 0o022 == 0
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        false
     }
 }
 
@@ -596,6 +702,42 @@ mod tests {
             assert!(!outside.join("newfile.stl").exists());
         }
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// In a shared temp directory only a private folder of the user's is
+    /// a root, and a link in it is judged where it leads.
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_temp_directory_allows_only_private_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let shared = std::env::temp_dir().join(format!("nsroots-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&shared);
+        let (private, open, outside) = (shared.join("mine"), shared.join("open"), shared.join("x"));
+        for (d, mode) in [(&shared, 0o777), (&private, 0o700), (&open, 0o775)] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let roots = Roots::new(&[], &[]).with_temp(&[], std::slice::from_ref(&shared));
+        let shared = lang::paths::plain(shared.canonicalize().unwrap());
+        assert!(roots.can_write(&shared.join("mine/a/b.stl")));
+        assert!(roots.can_read(&shared.join("mine/m.scad")));
+        assert!(!roots.can_write(&shared.join("open/b.stl")));
+        assert!(!roots.can_write(&shared.join("b.stl")));
+        assert!(!roots.can_write(&shared.join("missing/b.stl")));
+        assert!(!roots.can_write(&outside.join("b.stl")));
+        // A link in the private folder to the open one leads out of it.
+        std::os::unix::fs::symlink(shared.join("open"), shared.join("mine/l")).unwrap();
+        assert!(!roots.can_write(&shared.join("mine/l/b.stl")));
+        // A link directly in the shared directory to the private folder
+        // is judged as the folder it leads to.
+        std::os::unix::fs::symlink(shared.join("mine"), shared.join("alias")).unwrap();
+        assert!(roots.can_write(&shared.join("alias/b.stl")));
+        assert!(
+            roots
+                .refusal("export", &shared.join("b.stl"))
+                .contains("your own private folders in")
+        );
+        let _ = std::fs::remove_dir_all(&shared);
     }
 
     #[cfg(unix)]

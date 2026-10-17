@@ -83,6 +83,7 @@ fn model_props() -> Value {
         "source": {"type": "string", "description": "OpenSCAD code"},
         "base_dir": {"type": "string"},
         "parts": {"type": "boolean", "description": "Enable part(\"name\"){}"},
+        "enable": {"type": "array", "items": {"type": "string"}},
         "verbose": {"type": "boolean", "description": "Full JSON"},
     })
 }
@@ -112,7 +113,7 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "render",
-            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png; .step if started with --enable exact) and reads a mesh back: triangles, watertight, z range.",
+            "Build the geometry; report bbox, volume, area, manifold and components, to verify dimensions. `export` also writes it (.stl is ASCII STL; .3mf .obj .off .svg .dxf .png; .step with exact) and reads a mesh back; .echo holds every echo line.",
             json!({
                 "export": {"type": "string", "description": "Output file"},
                 "overwrite": {"type": "boolean"},
@@ -121,7 +122,7 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "snapshot",
-            "See the model: a PNG of iso/front/top/right views on a mm grid, plus bbox and volume. Judge shape and placement with it; render and measure give exact numbers.",
+            "See the model: a PNG of iso/front/top/right views on a grid, plus bbox and volume. Judge shape and placement with it; render and measure give exact numbers. `clean`: no grid, axes or header.",
             json!({
                 "views": {"type": "array", "items": {"type": "string"}, "description": "iso front back left right top bottom"},
                 "size": {"type": "string", "description": "WxH pixels, default 768x768"},
@@ -132,6 +133,8 @@ pub fn list() -> Vec<Value> {
                 "sketch": {"type": "string", "description": "Sketch name: draw it flat with constraints"},
                 "fillet": {"type": "string", "description": "Fillet call (index from 1, or its selector): its edges drawn, selected ones numbered"},
                 "dims": {"type": "boolean", "description": "Label bbox sizes"},
+                "units": {"type": "string", "description": "mm (default), in, ft"},
+                "clean": {"type": "boolean"},
                 "preview": {"type": "boolean", "description": "Show % and # modifiers"},
                 "output": {"type": "string", "description": "Also save it here"},
                 "overwrite": {"type": "boolean"},
@@ -140,12 +143,14 @@ pub fn list() -> Vec<Value> {
         ),
         tool(
             "check",
-            "3D-printability check: manifold, thin walls, overhangs, floating or tiny pieces, bed fit, intersecting parts; each finding has a location and a fix. Pass the spec's minimum wall as min_wall. `export` and `sections` add those in the same call.",
+            "3D-printability check: manifold, thin walls, overhangs, floating or tiny pieces, bed fit, intersecting parts; each finding has a location and a fix. Pass the spec's minimum wall as min_wall. Not for printing (an assembly)? printability: false. `export` and `sections` too.",
             json!({
                 "bed": {"type": "array", "items": {"type": "number"}, "description": "[w, d, h] mm"},
                 "nozzle": num("mm, default 0.4"),
                 "min_wall": num("mm, default 2 x nozzle"),
                 "max_overhang": num("degrees from vertical, default 45"),
+                "printability": {"type": "boolean"},
+                "enable": {"type": "array", "items": {"type": "string"}, "description": "Extensions: sketch fillet query exact..."},
                 "export": {"type": "string", "description": "Also write it, as render"},
                 "overwrite": {"type": "boolean"},
                 "sections": {"type": "array", "items": {"type": "string"}, "description": "Also measure these, e.g. [\"z=5\"]"},
@@ -460,9 +465,10 @@ impl Tools {
 
     /// Refuses a `.step`/`.stp` export on a server without NeoSCAD's
     /// `exact` extension, before any work: the extension is the server's
-    /// (`neoscad mcp --enable exact`) or that of the web page or app whose
-    /// text is the model (`page`, [`Model::enable`]), so the agent cannot turn it on
-    /// in the call, and the user has to be told what to change.
+    /// (`neoscad mcp --enable exact`), the call's (`enable: ["exact"]`) or
+    /// that of the web page or app whose text is the model (`page`,
+    /// [`Model::enable`], which has the call's added), and the refusal
+    /// says where to turn it on.
     fn step_allowed(&self, out: &Path, page: &[String]) -> Result<(), String> {
         let ext = out
             .extension()
@@ -488,7 +494,7 @@ impl Tools {
                 ""
             };
             return Err(format!(
-                "STEP export needs NeoSCAD's exact extension: start the server as `neoscad mcp --enable exact`{page_too}"
+                "STEP export needs NeoSCAD's exact extension: pass `enable: [\"exact\"]`, or start the server as `neoscad mcp --enable exact`{page_too}"
             ));
         }
         Ok(())
@@ -641,6 +647,18 @@ impl Tools {
     /// The model of `path` or `source` (`inline` names the document inline
     /// source is opened as).
     fn model(&self, args: &Value, inline: &str) -> Result<Model<'_>, String> {
+        let enable = enable_arg(args)?;
+        let mut m = self.model_of(args, inline)?;
+        for name in enable {
+            if !m.enable.contains(&name) {
+                m.enable.push(name);
+            }
+        }
+        Ok(m)
+    }
+
+    /// [`Self::model`] before the call's own `enable` is added.
+    fn model_of(&self, args: &Value, inline: &str) -> Result<Model<'_>, String> {
         let base = self.base(args)?;
         match (str_arg(args, "source"), self.readable(&base, args, "path")?) {
             (Some(_), Some(_)) => Err("give either path or source, not both".into()),
@@ -790,10 +808,21 @@ impl Tools {
         };
         let r = self.run(id, method, &p);
         self.done(m);
-        let r = r?;
+        let mut r = r?;
+        // An `.echo` export is the whole echo log in a file: it builds no
+        // geometry, and the lines stay out of the result (that is what
+        // the file is for: a 400-line cut list read back in context
+        // costs more than the agent wanted).
+        let echo_file = export.as_deref().is_some_and(is_echo);
+        let echoes = r["echo"].as_array().map_or(0, Vec::len);
+        if echo_file {
+            r["echo"] = json!([]);
+        }
         let mut text = status(&r);
-        text.push('\n');
-        text.push_str(&geometry_line_of(&r["geometry"], &r["diagnostics"]));
+        if !echo_file {
+            text.push('\n');
+            text.push_str(&geometry_line_of(&r["geometry"], &r["diagnostics"]));
+        }
         let mut back = Value::Null;
         // Written is not the same as succeeded: a model whose fillet or
         // chamfer calls failed is written with those edges sharp and the
@@ -804,7 +833,16 @@ impl Tools {
         if let Some(out) = &export
             && written
         {
-            text.push_str(&format!("\nwrote {} ({} bytes)", out.display(), r["bytes"]));
+            if echo_file {
+                text.push_str(&format!(
+                    "\nwrote {} ({echoes} echo line{}, {} bytes)",
+                    out.display(),
+                    if echoes == 1 { "" } else { "s" },
+                    r["bytes"]
+                ));
+            } else {
+                text.push_str(&format!("\nwrote {} ({} bytes)", out.display(), r["bytes"]));
+            }
             back = read_back(out);
             if !back.is_null() {
                 text.push_str(&format!("; {}", read_back_text(&back)));
@@ -829,7 +867,12 @@ impl Tools {
         }
         push_log(&mut text, &r);
         let mut s = terse_log(&r, &main);
-        s["geometry"] = terse_geometry(&r["geometry"], &r["diagnostics"]);
+        if echo_file {
+            s.as_object_mut().map(|o| o.remove("echo"));
+            s["echo_lines"] = json!(echoes);
+        } else {
+            s["geometry"] = terse_geometry(&r["geometry"], &r["diagnostics"]);
+        }
         if export.is_some() {
             // Only a written file is an output: `check` says "wrote" for
             // one, and a refused STEP export writes nothing.
@@ -882,6 +925,8 @@ impl Tools {
             "views": args.get("views").cloned().unwrap_or(json!([])),
             "size": str_arg(args, "size").unwrap_or(SNAPSHOT_SIZE),
             "dims": bool_arg(args, "dims"),
+            "units": str_arg(args, "units"),
+            "clean": bool_arg(args, "clean"),
             "preview": bool_arg(args, "preview"),
             "diff": diff,
             "highlight": args.get("highlight").cloned().unwrap_or(json!([])),
@@ -918,10 +963,11 @@ impl Tools {
                 text.push_str(&format!("; saved {}", o.display()));
             }
             text.push('\n');
-            text.push_str(&geometry_line_of(
-                &r["geometry"],
-                &r["diagnostics"]["items"],
-            ));
+            let line = geometry_line_of(&r["geometry"], &r["diagnostics"]["items"]);
+            text.push_str(&match str_arg(args, "units") {
+                Some(u) => in_units(&line, u),
+                None => line,
+            });
         }
         if let Some(d) = r.get("diff") {
             text.push_str(&format!(
@@ -943,6 +989,7 @@ impl Tools {
         let log = json!({
             "diagnostics": r["diagnostics"]["items"],
             "echo": r["diagnostics"]["echo"],
+            "echoes": r["diagnostics"]["echoes"],
         });
         push_log(&mut text, &log);
         let mut s = json!({
@@ -952,7 +999,12 @@ impl Tools {
             "size": r["size"],
             "diagnostics": terse_diags(&log["diagnostics"], &main),
         });
-        put_echo(&mut s, &log["echo"]);
+        for k in ["units", "clean"] {
+            if let Some(v) = r.get(k) {
+                s[k] = v.clone();
+            }
+        }
+        put_echo(&mut s, &log);
         for k in ["diff", "parts"] {
             if let Some(v) = r.get(k) {
                 s[k] = v.clone();
@@ -985,7 +1037,7 @@ impl Tools {
             if let Some(out) = self.writable(&base, args, "export", EXPORT_FORMATS)?
                 && !self.page_is_model(args)
             {
-                self.step_allowed(&out, &[])?;
+                self.step_allowed(&out, &enable_arg(args)?)?;
             }
         }
         let (mut out, rendered) = self.check_only(id, args)?;
@@ -1000,6 +1052,12 @@ impl Tools {
                 Ok(r) => {
                     let s = &r.structured;
                     match s["output"].as_str() {
+                        Some(o) if s["echo_lines"].is_u64() => {
+                            out.text.push_str(&format!(
+                                "\nwrote {o} ({} echo lines, {} bytes)",
+                                s["echo_lines"], s["bytes"]
+                            ));
+                        }
                         Some(o) => {
                             out.text
                                 .push_str(&format!("\nwrote {o} ({} bytes)", s["bytes"]));
@@ -1025,6 +1083,9 @@ impl Tools {
                     out.structured["export"] = json!({
                         "output": s["output"], "bytes": s["bytes"], "read_back": s["read_back"],
                     });
+                    if s["echo_lines"].is_u64() {
+                        out.structured["export"]["echo_lines"] = s["echo_lines"].clone();
+                    }
                     if !s["fillet_errors"].is_null() {
                         out.structured["export"]["fillet_errors"] = s["fillet_errors"].clone();
                     }
@@ -1070,7 +1131,7 @@ impl Tools {
     /// the same model.
     fn sub_args(&self, args: &Value) -> Value {
         let mut a = json!({});
-        for k in ["path", "source", "base_dir", "parts"] {
+        for k in ["path", "source", "base_dir", "parts", "enable"] {
             if let Some(v) = args.get(k) {
                 a[k] = v.clone();
             }
@@ -1084,14 +1145,20 @@ impl Tools {
         let main = m.path.clone();
         let imported = m.label.clone();
         let mut p = self.params(&m, args);
-        for k in ["bed", "nozzle", "min_wall", "max_overhang"] {
+        for k in ["bed", "nozzle", "min_wall", "max_overhang", "printability"] {
             if let Some(v) = args.get(k) {
                 p[k] = v.clone();
             }
         }
         let r = self.run(id, "check", &p);
         self.done(m);
-        let r = r?;
+        let mut r = r?;
+        // With the echo going to a `.echo` export, it stays out of the
+        // check's own text and structured content too.
+        if str_arg(args, "export").is_some_and(|e| is_echo(Path::new(e))) {
+            r["diagnostics"]["echo"] = json!([]);
+        }
+        let printing = args.get("printability").and_then(Value::as_bool) != Some(false);
         if r.get("failed").and_then(Value::as_bool) == Some(true) || r["model"].is_null() {
             let mut text = format!(
                 "failed (exit {}): the model did not render; nothing to check",
@@ -1103,6 +1170,7 @@ impl Tools {
                 "counts": {"errors": d["errors"], "warnings": d["warnings"], "echoes": d["echoes"]},
                 "diagnostics": d["items"],
                 "echo": d["echo"],
+                "echoes": d["echoes"],
             });
             push_log(&mut text, &log);
             return Ok((
@@ -1123,12 +1191,19 @@ impl Tools {
                 model["components"],
                 if model["components"] == 1 { "" } else { "s" },
                 size_of(&model["bbox"]),
-                model["min_wall"]["thickness"]
-                    .as_f64()
-                    .map_or("-".into(), |t| format!("about {} mm (sampled)", num(t)))
+                match model["min_wall"]["thickness"].as_f64() {
+                    _ if !printing => "not judged (printability: false)".into(),
+                    Some(t) => format!("about {} mm (sampled)", num(t)),
+                    None => "-".into(),
+                }
             ));
         }
-        text.push_str(&findings_text(&r["counts"], &r["findings"]));
+        let findings = findings_text(&r["counts"], &r["findings"]);
+        text.push_str(&match findings.strip_prefix("printable: ") {
+            // Nothing about printing was looked at.
+            Some(rest) if !printing => format!("geometry: {rest} (printability: false)"),
+            _ => findings,
+        });
         if let Some(t) = r["truncated"].as_object().filter(|t| !t.is_empty()) {
             let more: Vec<String> = t.iter().map(|(k, v)| format!("{v} more {k}")).collect();
             text.push_str(&format!("\n(and {})", more.join(", ")));
@@ -1141,8 +1216,7 @@ impl Tools {
             text.push('\n');
             text.push_str(&session::fillets::line_text(f));
         }
-        let log =
-            json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
+        let log = json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"], "echoes": r["diagnostics"]["echoes"]});
         push_log(&mut text, &log);
         // The model's own warnings and echo go in the structured content
         // too, not only the text: Claude Code shows an agent the structured
@@ -1158,7 +1232,7 @@ impl Tools {
             "truncated": r["truncated"],
             "diagnostics": terse_diags(&log["diagnostics"], &main),
         });
-        put_echo(&mut s, &log["echo"]);
+        put_echo(&mut s, &log);
         if let Some(sk) = terse_sketches(&r["sketches"], &main) {
             s["sketches"] = sk;
         }
@@ -1225,8 +1299,7 @@ impl Tools {
             }
         }
         let mut text = lines.join("\n");
-        let log =
-            json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"]});
+        let log = json!({"diagnostics": r["diagnostics"]["items"], "echo": r["diagnostics"]["echo"], "echoes": r["diagnostics"]["echoes"]});
         push_log(&mut text, &log);
         let mut s = r.clone();
         if let Some(o) = s.as_object_mut() {
@@ -1238,7 +1311,7 @@ impl Tools {
             }
         }
         s["diagnostics"] = terse_diags(&log["diagnostics"], &main);
-        put_echo(&mut s, &log["echo"]);
+        put_echo(&mut s, &log);
         if let Some(sk) = s.get("sketch").filter(|v| v.is_object()).cloned() {
             s["sketch"] = terse_place(&sk, &main);
         }
@@ -1266,6 +1339,7 @@ impl Tools {
             "cwd": base,
             "filter": str_arg(args, "filter"),
             "parts": bool_arg(args, "parts"),
+            "enable": enable_arg(args)?,
         });
         let r = self.run(id, "test", &p);
         if let Some(m) = m {
@@ -1632,6 +1706,22 @@ fn read_back_text(v: &Value) -> String {
 }
 
 /// Whether `p` names a mesh file ([`MESH_FORMATS`]).
+/// An export of the echo log (`.echo`).
+fn is_echo(p: &Path) -> bool {
+    p.extension()
+        .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("echo"))
+}
+
+/// A geometry line with its millimetres named as the model's `units`
+/// (`snapshot`'s `units`): the numbers are the model's own, whatever its
+/// unit, so only the labels change.
+fn in_units(line: &str, units: &str) -> String {
+    let u = render::snapshot::Units::parse(units).map_or("mm", |u| u.name());
+    line.replace(" mm³", &format!(" {u}³"))
+        .replace(" mm²", &format!(" {u}²"))
+        .replace(" mm ", &format!(" {u} "))
+}
+
 fn is_mesh(p: &Path) -> bool {
     p.extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -1784,6 +1874,33 @@ fn check_args(tools: &[Value], name: &str, args: &Value) -> Result<(), String> {
 }
 
 // --- Summaries ---------------------------------------------------------------
+
+/// The call's `enable`: NeoSCAD's extensions and OpenSCAD's experimental
+/// features by the command line's `--enable` names, added to the server's
+/// own `--enable` for this call. An unknown name is refused, so a typo
+/// does not read as a model that ignores the feature.
+fn enable_arg(args: &Value) -> Result<Vec<String>, String> {
+    let names: Vec<String> = args
+        .get("enable")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if let Some(bad) = names.iter().find(|n| {
+        n.as_str() != "all"
+            && eval::Extension::from_name(n).is_none()
+            && eval::Feature::from_name(n).is_none()
+    }) {
+        let mut known: Vec<&str> = eval::Extension::ALL.iter().map(|e| e.name()).collect();
+        known.extend(eval::Feature::ALL.iter().map(|f| f.name()));
+        return Err(format!(
+            "`enable` has an unknown name '{bad}'; it takes {}",
+            known.join(", ")
+        ));
+    }
+    Ok(names)
+}
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
@@ -2218,21 +2335,40 @@ fn terse_diags(v: &Value, main: &Path) -> Value {
 }
 
 fn terse_log(r: &Value, main: &Path) -> Value {
-    json!({
+    let mut s = json!({
         "exit_code": r["exit_code"],
         "counts": r["counts"],
         "diagnostics": terse_diags(&r["diagnostics"], main),
         "echo": r["echo"].as_array().map(|e| e.iter().take(MAX_LINES).cloned().collect::<Vec<_>>()),
-    })
+    });
+    if let Some(more) = more_echo(r) {
+        s["echo_more"] = json!(format!("{more} more lines: export to a .echo path for all"));
+    }
+    s
 }
 
 /// The echo lines (at most [`MAX_LINES`]) in a terse result that builds
 /// geometry. Left out when there are none, so a model without `echo()`
 /// pays nothing for it in every `check`, `snapshot` and `measure`.
-fn put_echo(s: &mut Value, echo: &Value) {
-    if let Some(e) = echo.as_array().filter(|e| !e.is_empty()) {
+fn put_echo(s: &mut Value, log: &Value) {
+    if let Some(e) = log["echo"].as_array().filter(|e| !e.is_empty()) {
         s["echo"] = json!(e.iter().take(MAX_LINES).cloned().collect::<Vec<_>>());
+        if let Some(more) = more_echo(log) {
+            s["echo_more"] = json!(format!("{more} more lines: export to a .echo path for all"));
+        }
     }
+}
+
+/// How many echo lines a log has past the [`MAX_LINES`] shown: the
+/// summaries of `check`, `snapshot` and `measure` keep only the first 20
+/// and give the total as `echoes`.
+fn more_echo(log: &Value) -> Option<usize> {
+    let shown = log["echo"].as_array().map_or(0, Vec::len).min(MAX_LINES);
+    let total = log["echoes"]
+        .as_u64()
+        .map_or(0, |n| n as usize)
+        .max(log["echo"].as_array().map_or(0, Vec::len));
+    (total > shown).then_some(total - shown)
 }
 
 /// The diagnostics and echo lines under a summary, at most
@@ -2278,10 +2414,9 @@ fn push_log(text: &mut String, r: &Value) {
         text.push('\n');
         text.push_str(e.as_str().unwrap_or(""));
     }
-    if echo.len() > MAX_LINES {
+    if let Some(more) = more_echo(r) {
         text.push_str(&format!(
-            "\n... {} more echo lines (verbose: true)",
-            echo.len() - MAX_LINES
+            "\n... {more} more echo lines (all of them in a file: export to a .echo path)"
         ));
     }
 }

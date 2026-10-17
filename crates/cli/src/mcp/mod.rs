@@ -33,7 +33,7 @@ mod tools;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -64,7 +64,7 @@ const TTL_MS: u64 = 3_600_000;
 /// tools answer in milliseconds, so the wording avoids reading as a ladder
 /// of separate calls (evaluate, then render, then snapshot, then check).
 /// With the recipes it has to fit [`INSTRUCTIONS_LIMIT`].
-const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`) reports its errors, warnings, echo, geometry and printability findings, so there is no need to `evaluate` or `render` first. Call tools on independent files or questions in parallel. `measure` gives exact numbers (sections, distances); `snapshot` shows the shape when it is in doubt. `check` also takes `export` and `sections`, so one call can verify, measure and write the file; an export is read back, so the file needs no other inspection. Info findings (short bridges, thread flanks, slivers) need no action. A model is a file you write (`path`) or inline `source`.";
+const INSTRUCTIONS: &str = "NeoSCAD is an OpenSCAD-compatible modeller; every tool answers in milliseconds. After writing or editing a model, one `check` (with the spec's minimum wall as `min_wall`; `printability: false` if not for printing) reports errors, warnings, echo, geometry and findings: no `evaluate` or `render` first. Call tools on independent questions in parallel. `measure` gives exact numbers; `snapshot` shows the shape when in doubt. `check` also takes `sections` and `export` (read back, needing no other inspection; .echo gets every echo line). Info findings need no action. A model is a file (`path`) or inline `source`; `enable` turns on extensions (sketch, fillet...).";
 
 /// The most of the instructions a client is known to keep, in UTF-16
 /// code units. Claude Code (2.1.286) cuts a server's instructions after
@@ -122,9 +122,10 @@ enum Extra {
 /// there is a page bridge (or the app's when an app is connected), then
 /// the recipes if they fit [`INSTRUCTIONS_LIMIT`] and a pointer to them if
 /// not.
-fn instructions(extra: Extra) -> String {
+fn instructions(extra: Extra, cli: Option<&Path>) -> String {
     let head = format!(
-        "{INSTRUCTIONS}{}",
+        "{INSTRUCTIONS}{}{}",
+        cli.map_or(String::new(), cli_sentence),
         match extra {
             Extra::None => "",
             Extra::Browser => BROWSER_INSTRUCTIONS,
@@ -137,6 +138,29 @@ fn instructions(extra: Extra) -> String {
     } else {
         format!("{head}{RECIPES_POINTER}")
     }
+}
+
+/// Where the command line is, when this server is an app's bundled copy
+/// (`NeoSCAD.app/Contents/Helpers/neoscad`): an agent that wants the
+/// command line (`neoscad --help`) went looking in the bundle and ran
+/// `Contents/MacOS/NeoSCAD --help`, the app itself, which opened a window
+/// rather than printing anything. A `neoscad` on `PATH` needs no telling.
+fn bundled_cli(exe: &Path) -> Option<&Path> {
+    let helpers = exe.parent()?;
+    let contents = helpers.parent()?;
+    let bundle = contents.parent()?;
+    let is = |p: &Path, name: &str| p.file_name().is_some_and(|n| n == name);
+    (is(helpers, "Helpers")
+        && is(contents, "Contents")
+        && bundle
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app")))
+    .then_some(exe)
+}
+
+/// The instructions' sentence for [`bundled_cli`].
+fn cli_sentence(exe: &Path) -> String {
+    format!(" CLI: `{}`.", exe.display())
 }
 
 /// What `--browser` adds to [`INSTRUCTIONS`].
@@ -161,6 +185,13 @@ pub(crate) struct Args {
     /// directories are readable.
     #[arg(long = "root", value_name = "DIR", action = clap::ArgAction::Append)]
     roots: Vec<PathBuf>,
+
+    /// Do not allow the temp directory. By default the user's temp
+    /// directory and the user's own private folders directly in /tmp (as
+    /// Claude Code's scratch folder is) are readable and writable too, so
+    /// an agent can keep its scratch files there.
+    #[arg(long = "no-temp")]
+    no_temp: bool,
 
     /// Geometry cache budget in MiB (as `neoscad serve --cache-mb`).
     #[arg(long = "cache-mb", value_name = "MiB")]
@@ -269,6 +300,10 @@ pub fn main(args: Vec<OsString>) -> u8 {
     if let Some(why) = cwd_refused {
         roots = roots.with_unsafe_cwd(&cwd, why);
     }
+    if !a.no_temp {
+        let (temp, shared) = temp_dirs(home.as_deref());
+        roots = roots.with_temp(&temp, &shared);
+    }
     if roots.writable().len() < write.len() {
         eprintln!("neoscad mcp: warning: a --root that does not exist was ignored");
     }
@@ -343,7 +378,16 @@ pub fn main(args: Vec<OsString>) -> u8 {
         }
     };
     let server = Arc::new(Server {
-        instructions: instructions(extra),
+        instructions: instructions(
+            extra,
+            // Resolved: clients run the app's copy through a link
+            // (`~/Library/Application Support/NeoSCAD/bin/neoscad`).
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.canonicalize().ok())
+                .as_deref()
+                .and_then(bundled_cli),
+        ),
         bridge: bridge.clone(),
         apps: apps.clone(),
         initialized: AtomicBool::new(false),
@@ -374,6 +418,29 @@ pub fn main(args: Vec<OsString>) -> u8 {
     let stdin = std::io::stdin();
     serve(&server, stdin.lock());
     0
+}
+
+/// The temp directories [`roots::Roots::with_temp`] allows: the user's
+/// temp directory when it is safe as a root (`$TMPDIR` set to `/` or the
+/// home folder is not), and the shared temp directories (`/tmp`,
+/// `/var/tmp`, and a `$TMPDIR` that is one of them, as on Linux), in
+/// which only the user's own private folders are allowed.
+fn temp_dirs(home: Option<&Path>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let system = roots::SystemDirs::here();
+    let mut temp = Vec::new();
+    let mut shared: Vec<PathBuf> = if cfg!(unix) {
+        vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]
+    } else {
+        Vec::new()
+    };
+    if let Some(t) = system.temp.clone() {
+        match roots::unsafe_cwd(&t, home, &system) {
+            None => temp.push(t),
+            Some(_) if system.shared.contains(&t) => shared.push(t),
+            Some(_) => {}
+        }
+    }
+    (temp, shared)
 }
 
 struct Server {
@@ -685,4 +752,38 @@ fn request(server: &Server, id: &Value, method: &str, params: &Value) -> Result<
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An app's bundled copy says where the command line is, and the
+    /// recipes still fit Claude Code's 2,048 characters with it (a path as
+    /// long as an app in `/Applications` and some to spare).
+    #[test]
+    fn a_bundled_server_names_its_command_line() {
+        let exe = Path::new("/Applications/NeoSCAD.app/Contents/Helpers/neoscad");
+        assert_eq!(bundled_cli(exe), Some(exe));
+        assert_eq!(bundled_cli(Path::new("/usr/local/bin/neoscad")), None);
+        assert_eq!(
+            bundled_cli(Path::new(
+                "/Applications/NeoSCAD.app/Contents/MacOS/NeoSCAD"
+            )),
+            None
+        );
+        let long = Path::new("/Users/ada/Applications/NeoSCAD.app/Contents/Helpers/neoscad");
+        for exe in [exe, long] {
+            let text = instructions(Extra::None, Some(exe));
+            assert!(text.contains(&format!("`{}`", exe.display())), "{text}");
+            assert!(text.ends_with(RECIPES), "{text}");
+            assert!(text.encode_utf16().count() <= INSTRUCTIONS_LIMIT);
+        }
+        let plain = instructions(Extra::None, None);
+        assert!(!plain.contains("CLI"), "{plain}");
+        assert!(plain.ends_with(RECIPES));
+        // With the app's paragraph the recipes are a pointer anyway.
+        let app = instructions(Extra::App, Some(exe));
+        assert!(app.contains("Helpers/neoscad") && app.ends_with(RECIPES_POINTER));
+    }
 }

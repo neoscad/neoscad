@@ -33,7 +33,16 @@ impl Mcp {
     /// Started in `dir` with `env` set. The app link looks for apps in a
     /// directory of the test's own (empty), never the user's: a NeoSCAD
     /// app running on this machine must not change what these tests see.
+    /// `--no-temp`: the tests' folders are in the temp directory, and
+    /// what they keep out of the roots must stay out; [`Mcp::start_raw`]
+    /// starts a server with the temp directories allowed, as by default.
     fn start_with(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Mcp {
+        let mut all = vec!["--no-temp"];
+        all.extend_from_slice(args);
+        Mcp::start_raw(dir, &all, env)
+    }
+
+    fn start_raw(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Mcp {
         let mut cmd = Command::new(BIN);
         cmd.env(
             "NEOSCAD_AGENT_DIR",
@@ -199,13 +208,15 @@ fn tools_list_is_small_and_ordered() {
         );
     }
     // What a client puts in the model's context (name, description and
-    // schema of each tool) stays small: about 1,400 tokens.
+    // schema of each tool) stays small: about 1,500 tokens.
     let visible: Vec<Value> = tools
         .iter()
         .map(|t| json!([t["name"], t["description"], t["inputSchema"]]))
         .collect();
     let size = Value::Array(visible).to_string().len();
-    assert!(size < 5500, "the tools are {size} bytes");
+    // 6,000 since every model tool took `enable`, `check` `printability`
+    // and `snapshot` `units` and `clean` (it was 5,500).
+    assert!(size < 6000, "the tools are {size} bytes");
     eprintln!("tools as the model sees them: {size} bytes");
     assert_eq!(r["result"]["resultType"], "complete");
 }
@@ -1721,4 +1732,216 @@ fn the_recipes_are_in_the_instructions_and_each_one_prints() {
             );
         }
     }
+}
+
+/// Every echo line goes to a `.echo` export, and none of them into the
+/// result: a 400-line cut list stays out of the agent's context. The
+/// result says how many lines the file holds; `check` with the export
+/// leaves its own echo out too. A result that cuts the echo short says
+/// how to get all of it.
+#[test]
+fn an_echo_export_holds_every_line_and_the_result_none() {
+    let dir = scratch("echo-file");
+    let src = "for (i = [1:30]) echo(board = i, len = 10 * i);\ncube(1);\n";
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("check", json!({"source": src}));
+    assert!(
+        text(&r).contains("... 10 more echo lines (all of them in a file: export to a .echo path)"),
+        "{}",
+        text(&r)
+    );
+    for tool in ["render", "check"] {
+        let file = format!("out/{tool}.echo");
+        let r = s.tool(tool, json!({"source": src, "export": file}));
+        assert_eq!(r["isError"], false, "{r}");
+        let t = text(&r);
+        assert!(t.contains("(30 echo lines, "), "{tool}: {t}");
+        assert!(!t.contains("ECHO:"), "{tool}: {t}");
+        let sc = &r["structuredContent"];
+        assert!(sc.get("echo").is_none(), "{tool}: {sc}");
+        let lines = if tool == "render" {
+            &sc["echo_lines"]
+        } else {
+            &sc["export"]["echo_lines"]
+        };
+        assert_eq!(lines, 30, "{tool}: {sc}");
+        let written = std::fs::read_to_string(dir.join(&file)).unwrap();
+        assert_eq!(written.lines().count(), 30, "{written}");
+        assert_eq!(written.lines().last(), Some("ECHO: board = 30, len = 300"));
+    }
+}
+
+/// The temp directory is a root by default, and on Unix so is the
+/// user's own private folder directly in `/tmp` (as Claude Code's
+/// scratch folder is), but not a folder anyone may write in, nor one
+/// that is not there; `--no-temp` turns it off.
+#[test]
+fn the_temp_directory_is_a_root() {
+    let project = scratch("temp-project");
+    let tmp = scratch("temp-dir");
+    let env: &[(&str, &Path)] = if cfg!(windows) {
+        &[("TEMP", &tmp), ("TMP", &tmp)]
+    } else {
+        &[("TMPDIR", &tmp)]
+    };
+    let mut s = Mcp::start_raw(&project, &[], env);
+    let out = tmp.join("scratch/cube.stl");
+    let r = s.tool("render", json!({"source": "cube(2);", "export": out}));
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(out.exists());
+    // A model written there may be read, as an agent's scratch model is.
+    std::fs::write(tmp.join("scratch/m.scad"), "cube(3);").unwrap();
+    let r = s.tool("render", json!({"path": tmp.join("scratch/m.scad")}));
+    assert_eq!(r["isError"], false, "{r}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let private = PathBuf::from(format!("/tmp/nsmcp-{}-private", std::process::id()));
+        let open = PathBuf::from(format!("/tmp/nsmcp-{}-open", std::process::id()));
+        for (d, mode) in [(&private, 0o700), (&open, 0o777)] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir(d).unwrap();
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let r = s.tool(
+            "render",
+            json!({"source": "cube(2);", "export": private.join("a/cube.stl")}),
+        );
+        assert_eq!(r["isError"], false, "{r}");
+        assert!(private.join("a/cube.stl").exists());
+        for refused in [
+            open.join("cube.stl"),
+            PathBuf::from(format!(
+                "/tmp/nsmcp-{}-missing/cube.stl",
+                std::process::id()
+            )),
+            PathBuf::from("/tmp/cube.stl"),
+        ] {
+            let r = s.tool("render", json!({"source": "cube(2);", "export": refused}));
+            assert_eq!(r["isError"], true, "{r}");
+            assert!(text(&r).contains("outside the allowed roots"), "{r}");
+            assert!(text(&r).contains("your own private folders in"), "{r}");
+            assert!(!refused.exists());
+        }
+        for d in [&private, &open] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+    let mut s = Mcp::start_raw(&project, &["--no-temp"], env);
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(2);", "export": tmp.join("other.stl")}),
+    );
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(!tmp.join("other.stl").exists());
+}
+
+/// `printability: false` keeps the findings about the geometry itself (a
+/// pinched edge) and drops those about printing it: a floating thin board
+/// in an assembly is no error there.
+#[test]
+fn check_without_printability_keeps_only_geometry_findings() {
+    let dir = scratch("assembly");
+    let boards = "cube([10, 10, 1]); translate([0, 0, 5]) cube([40, 10, 0.2]);";
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("check", json!({"source": boards}));
+    assert_eq!(r["structuredContent"]["ok"], false, "{r}");
+    let codes: Vec<&str> = r["structuredContent"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"floating") && codes.contains(&"thin-wall"),
+        "{codes:?}"
+    );
+    let r = s.tool("check", json!({"source": boards, "printability": false}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["ok"], true, "{r}");
+    assert_eq!(sc["findings"], json!([]), "{r}");
+    let t = text(&r);
+    assert!(
+        t.contains("geometry: no findings (printability: false)"),
+        "{t}"
+    );
+    assert!(t.contains("thinnest wall not judged"), "{t}");
+    // Two cubes that share an edge are not one solid, printed or not.
+    let pinched = "cube(10); translate([10, 10, 0]) cube(10);";
+    let r = s.tool("check", json!({"source": pinched, "printability": false}));
+    let sc = &r["structuredContent"];
+    assert_eq!(sc["ok"], false, "{r}");
+    assert_eq!(sc["findings"][0]["code"], "not-manifold", "{r}");
+}
+
+/// `snapshot`'s `units` names the model's unit in its labels, and `clean`
+/// draws the model alone; neither changes a default snapshot.
+#[test]
+fn snapshot_units_and_clean() {
+    let dir = scratch("units");
+    let src = "cube([120, 144, 96]);";
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("snapshot", json!({"source": src, "units": "cubits"}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).contains("`units`"), "{r}");
+    let base = json!({"source": src, "views": ["iso"], "size": "128x128"});
+    let plain = s.tool("snapshot", base.clone());
+    if no_gpu(&plain) {
+        return;
+    }
+    assert!(plain["structuredContent"].get("units").is_none(), "{plain}");
+    assert!(text(&plain).contains("120 x 144 x 96 mm"), "{plain}");
+    let mut a = base.clone();
+    a["units"] = json!("in");
+    let r = s.tool("snapshot", a);
+    let t = text(&r);
+    assert!(t.contains("3D bbox 120 x 144 x 96 in at"), "{t}");
+    assert!(t.contains(" in³") && !t.contains("mm"), "{t}");
+    assert_eq!(r["structuredContent"]["units"], "in", "{r}");
+    let mut a = base.clone();
+    a["clean"] = json!(true);
+    let r = s.tool("snapshot", a);
+    assert_eq!(r["structuredContent"]["clean"], true, "{r}");
+    assert_ne!(r["content"][1]["data"], plain["content"][1]["data"]);
+}
+
+/// `enable` turns NeoSCAD's extensions on for one call, by the command
+/// line's names: a sketch draws, and an unknown name is refused.
+#[test]
+fn enable_turns_on_extensions_per_call() {
+    let dir = scratch("enable-call");
+    let recipe = include_str!("../src/mcp/recipe_sketch.scad");
+    let src = format!("{recipe}\nsketch_plate();\n");
+    let mut s = Mcp::start(&dir, &[]);
+    let r = s.tool("render", json!({"source": src}));
+    assert!(text(&r).contains("Ignoring unknown module 'sketch'"), "{r}");
+    for tool in ["evaluate", "render", "check", "measure"] {
+        let r = s.tool(tool, json!({"source": src, "enable": ["sketch"]}));
+        assert_eq!(r["isError"], false, "{tool}: {r}");
+        assert!(!text(&r).contains("unknown module"), "{tool}: {r}");
+    }
+    let r = s.tool(
+        "check",
+        json!({"source": src, "enable": ["sketch"], "export": "plate.stl"}),
+    );
+    assert!(text(&r).contains("watertight"), "{r}");
+    let r = s.tool(
+        "measure",
+        json!({"source": "part(\"a\") cube(1);", "enable": ["part"], "verbose": true}),
+    );
+    assert_eq!(
+        r["structuredContent"]["parts"].as_array().map(Vec::len),
+        Some(1),
+        "{r}"
+    );
+    let r = s.tool("render", json!({"source": src, "enable": ["skech"]}));
+    assert_eq!(r["isError"], true, "{r}");
+    assert!(text(&r).contains("unknown name 'skech'"), "{r}");
+    // A STEP export with `exact` for the call alone.
+    let r = s.tool(
+        "render",
+        json!({"source": "cube(2);", "export": "c.step", "enable": ["exact"]}),
+    );
+    assert_eq!(r["isError"], false, "{r}");
+    assert!(dir.join("c.step").exists());
 }

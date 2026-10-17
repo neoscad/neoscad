@@ -29,7 +29,8 @@ shape):
                             "args": ["mcp", "--root", "/path/to/models"]}}}
 ```
 
-Flags: `--root DIR` (repeatable), `--cache-mb N` (the geometry cache
+Flags: `--root DIR` (repeatable), `--no-temp` (do not allow the temp
+directories; "Safety"), `--cache-mb N` (the geometry cache
 budget, as for `serve`), `--log FILE` (append every message received
 and sent, for debugging a client), `--limit NAME=VALUE` (repeatable:
 change a resource limit; see "Safety"), `--enable FEATURE` (repeatable:
@@ -73,7 +74,15 @@ copy on `PATH`; the CLI's own packages do that
   The CLI is in `Contents/Helpers`, not `Contents/MacOS`, because APFS
   is case-insensitive by default and `Contents/MacOS/neoscad` would be the
   app's own executable, `NeoSCAD`. The cask exposes no `binary`
-  (`packaging/homebrew/neoscad-app.rb`).
+  (`packaging/homebrew/neoscad-app.rb`). An agent looking for the
+  command line ran `Contents/MacOS/NeoSCAD --help`, which opened the app
+  and never returned: the app's binary now hands `--help`, `-h`,
+  `--version` and `-V` (as its first argument, which no normal launch
+  passes) to `Contents/Helpers/neoscad` with `execv` before AppKit
+  starts (`CommandLineTool.handOffIfAsked`), so they print the CLI's
+  help or version and exit. A server that is the app's copy names it in
+  its instructions (`` CLI: `.../NeoSCAD.app/Contents/Helpers/neoscad`. ``,
+  resolved through the link), so an agent need not look.
 - **Windows.** In `bin\` for the same reason: `neoscad.exe` beside
   `NeoSCAD.exe` would be the same file. It is built as cargo-dist builds
   the released CLI (the `dist` profile, the C runtime linked statically).
@@ -204,7 +213,15 @@ JSON-RPC error for an unknown tool. Each takes a model as `path` (a
 `.scad` file) or `source` (OpenSCAD text, so an agent can iterate
 without writing files); `base_dir` is where relative paths and a
 source's `include`s resolve (default: the server's working directory, or its first `--root` when the
-working directory is not a root; "Safety").
+working directory is not a root; "Safety"). `enable` (an array) turns
+on NeoSCAD's extensions (`sketch`, `fillet`, `query`, `exact`, `part`)
+or OpenSCAD's experimental features, by the command line's `--enable`
+names, for this call, on top of the server's own `--enable`; an unknown
+name is refused, listing the names. Without it a library that uses
+`sketch()` drew nothing through `snapshot`, with "Ignoring unknown
+module 'sketch'" sixteen times, while the command line with `--enable
+sketch` worked. Only `check`'s schema lists the names; the other tools'
+`enable` is a bare array of strings, and the instructions name it.
 Inline source is evaluated as `inline.scad` in `base_dir` (messages name
 it so) and removed afterwards. `parts: true` turns on the `part()`
 extension (`docs/cli-json.md`), and `verbose: true` returns the server's
@@ -221,43 +238,51 @@ transcript audit read as a problem in its model.
 | Tool | What it answers | Extra arguments |
 |---|---|---|
 | `evaluate` | errors and warnings with fix hints, `echo()` output; no geometry | |
-| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL; `.step` with `--enable exact`), `overwrite` |
-| `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `sketch` (a sketch name, with `--enable sketch`: drawn flat with its constraints, `docs/sketch.md`), `fillet` (a fillet call's number or selector, with `--enable fillet`: its edges drawn, the selected ones numbered, `docs/fillet-edges.md`), `dims`, `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
-| `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall`; optionally `render`'s export and `measure`'s sections in the same result | `bed`, `nozzle`, `min_wall`, `max_overhang`, `export`, `overwrite`, `sections` (planes, each as `measure`'s `section`) |
+| `render` | bbox, volume, area, manifold (including edges pinched where two pieces touch, and edges an STL breaks at 32-bit precision), components; optionally writes the model and reads a mesh file back | `export` (a file; format from its extension; `.stl` is ASCII STL; `.step` with `exact`; `.echo` every echo line, "Echo output" below), `overwrite` |
+| `snapshot` | a PNG contact sheet as MCP image content, plus the geometry summary | `views`, `size` (default `768x768`), `diff_against` (a file) or `diff_source`, `highlight`, `issues`, `sketch` (a sketch name, with `--enable sketch`: drawn flat with its constraints, `docs/sketch.md`), `fillet` (a fillet call's number or selector, with `--enable fillet`: its edges drawn, the selected ones numbered, `docs/fillet-edges.md`), `dims`, `units` (`mm`, the default, `in` or `ft`: the model's unit, named in the labels and the text), `clean` (the model alone, with no header, captions, grid or axis cross, for a document), `preview`, `output` (also save the PNG; a `.png` name), `overwrite` |
+| `check` | printability findings, each with location and fix; the description asks for the spec's minimum wall as `min_wall`; optionally `render`'s export and `measure`'s sections in the same result | `bed`, `nozzle`, `min_wall`, `max_overhang`, `printability` (`false`: only the geometry's findings, "Models not for printing" below), `export`, `overwrite`, `sections` (planes, each as `measure`'s `section`) |
 | `measure` | model and part bbox, volume, centroid; distance between parts, or the overlap's pieces; sections with each contour's area, bbox, hole and radii; a radius profile with crests and pitch; a constrained sketch's solved points, lengths, angles and radii | `part`, `between`, `section`, `axis` (`x`/`y`/`z`, default z), `center` (`[a, b]`, the axis's position, default `[0, 0]`), `profile` (`[from, to, step]` along the axis), `sketch` (a sketch's `name`, with `--enable sketch`), `fillet` (a fillet call's number or selector, with `--enable fillet`: its selected edges) |
 | `test` (`--tool test`) | model tests (`docs/model-tests.md`); `path` is a test file or directory, `source` a test file's text | `filter` |
 | `format` (`--tool format`) | `source`: the formatted text; `path`: rewrites the file (only whitespace changes) | `check` (say how many lines would change, write nothing), `diff` (with `check`: the diff itself) |
 | `docs` | a builtin's or printing recipe's reference, or with `path` a file's definitions; no name: the index, which ends with the recipes' names | `name`, `full`, `verbose` (the whole index) |
 
 The server's `instructions` (sent once, at discovery or `initialize`)
-say when to use which: after an edit, one `check` (with `min_wall`)
-gives errors, warnings, echo, geometry and printability, with no
-`evaluate` or `render` first; independent calls go in parallel;
-`measure` for exact numbers, `snapshot` when the shape is in doubt;
-`check` also takes `export` and `sections`, and an export is read
-back; info findings need no action. A list of tools in turn reads as a
+say when to use which: after an edit, one `check` (with `min_wall`, or
+`printability: false` for a model not to be printed) gives errors,
+warnings, echo, geometry and findings, with no `evaluate` or `render`
+first; independent calls go in parallel; `measure` for exact numbers,
+`snapshot` when the shape is in doubt; `check` also takes `sections`
+and `export`, an export is read back, and a `.echo` export gets every
+echo line; info findings need no action; `enable` turns on extensions.
+A server that is a desktop app's bundled copy adds where its command
+line is (`` CLI: `<path>`. ``, "Setup from the apps"). A list of tools in turn reads as a
 sequence of separate calls, and each turn an agent takes costs seconds
 of model time and a re-read of its whole context, while a tool call
 takes milliseconds. A picture stays `snapshot`'s own call, so the agent
 takes one only when it decides it needs one. The
-instructions end with the printing recipes ("Recipes" below): 740
-bytes of guidance, then 1,300 of recipes with their heading (2,040 in
-all, 2,038 characters, roughly 550 tokens). Claude Code (2.1.286) keeps
+instructions end with the printing recipes ("Recipes" below): 663
+bytes of guidance, then 1,300 of recipes with their heading (1,961
+characters, roughly 530 tokens), leaving room for the CLI's path of an
+app in `/Applications` or `~/Applications`. To make room for
+`printability`, `.echo`, `enable` and the path, the guidance (740 bytes
+before) lost the info findings' examples ("short bridges, thread
+flanks, slivers"). Claude Code (2.1.286) keeps
 the first 2,048 characters of a server's instructions and marks the
 cut "… [truncated]", so the whole text stays under that, which
 `crates/cli/tests/mcp.rs` checks; past it, the last recipe would be cut
 mid-comment. With `--browser` the page's paragraph leaves no
 room, and the recipes become a pointer to `neoscad://recipes`.
 
-The tool list is 4,916 bytes of compact JSON as `[name, description,
+The tool list is 5,630 bytes of compact JSON as `[name, description,
 input schema]` arrays, which is what `crates/cli/tests/mcp.rs` measures
-and keeps under 5,500 bytes (each description under 300); `render`'s
-`.step` mention is 37 of them. What a client
-receives is larger: 5,126 bytes with the keys (`name`, `description`,
-`inputSchema`) and 5,344 with `annotations`, roughly 1,300-1,550 tokens
+and keeps under 6,000 bytes (each description under 300). What a client
+receives is larger: 5,840 bytes with the keys (`name`, `description`,
+`inputSchema`) and 6,058 with `annotations`, roughly 1,450-1,750 tokens
 (estimated at 3.5-4 bytes a token; not measured with a tokenizer). With
-`--tool test --tool format` the list is 6,006 bytes (6,577 as
-received); before `test` and `format` were opt-in it was 5,488, without
+`--tool test --tool format` the list is 6,828 bytes. It was 5,151
+(and the cap 5,500) before every model tool took `enable` (about 50
+bytes each), `check` `printability` and `snapshot` `units` and
+`clean`; before `test` and `format` were opt-in it was 5,488, without
 `check`'s `export`, `overwrite` and `sections`. To make room
 for `measure`'s `axis`, `center` and `profile`, `base_dir` lost its
 description ("Dir for includes") and others were shortened.
@@ -289,13 +314,11 @@ every export, agents had checked the file with Bash (`ls`, `head`,
 A server started with `--enable exact` writes `.step` (and `.stp`)
 through `render`'s or `check`'s `export`: STEP whose faces are the
 model's true planes, cylinders, cones, spheres and tori
-(`docs/step-export.md`). The extension is server-wide, as `--enable`
-always is here: an agent cannot turn it on in a call, so a `.step`
-export on a server without it fails before anything runs, saying to
-start the server as `neoscad mcp --enable exact`. The tool descriptions
-mention `.step` in 37 bytes, and the instructions not at all: they
-are at Claude Code's limit already, and a server without the extension
-must not steer agents to it.
+(`docs/step-export.md`), and so does a call with `enable: ["exact"]`.
+A `.step` export without either fails before anything runs, saying to
+pass `enable: ["exact"]` or start the server as `neoscad mcp --enable
+exact`. `render`'s description mentions `.step with exact`, and
+`check`'s `enable` lists `exact` among the extensions.
 
 A STEP file is not read back (it is not a mesh). Instead the text adds
 the report's first lines (`STEP: 7 of 16 faces exact (43.8%).`, then
@@ -334,6 +357,41 @@ before anything runs; an export that exists needs `overwrite: true`.
 Without these arguments the result is exactly what it was. Agents had
 run `check`, `measure`, `snapshot` and `render` with `export` as
 separate turns after their last edit.
+
+### Echo output
+
+A result shows at most 20 echo lines, in the text and the structured
+content; past that the text ends `... 10 more echo lines (all of them in
+a file: export to a .echo path)` and the structured content has
+`"echo_more": "10 more lines: export to a .echo path for all"`
+(`check`, `snapshot` and `measure` used to stop at 20 without saying
+so, and `verbose` did not give the rest either). `render` or `check`
+with `export` ending in `.echo` writes every echo line to the file, as
+`neoscad -o model.echo` does, and keeps them out of the result: the
+text says `wrote out/cuts.echo (412 echo lines, 18034 bytes)`, the
+structured content has `echo_lines` (under `export` for `check`) and no
+`echo`, and a `.echo` export builds no geometry. An agent that echoed a
+400-line cut list had the choice of 20 lines or `verbose`'s whole JSON
+in its context.
+
+### Models not for printing
+
+`check` is a 3D-printing check, and a model that is not printed (a
+timber shed in inches, a jig, an assembly) fails it for being what it
+is: its boards are separate pieces (`floating`), its plywood is thinner
+than a printed wall (`thin-wall`), its roof overhangs and its base is
+off the bed. `printability: false` leaves those findings out
+(`floating`, `tiny-feature`, `off-bed`, `bed-fit`, `thin-wall`,
+`overhang`, `cavity`, `touching-surfaces`: `session::check::PRINTING_CODES`)
+and keeps those about the geometry itself (manifold, pinched edges, the
+input meshes, intersecting parts, cuts), so `ok` means the geometry is
+sound. The text's first line says `thinnest wall not judged
+(printability: false)`, and a clean result reads `geometry: no findings
+(printability: false)`. `snapshot`'s `units` (`in`, `ft`) names the
+model's unit in the picture's grid step, dimensions and size line and
+in the text (`3D bbox 120 x 144 x 96 in at ...`); the numbers are the
+model's own, since OpenSCAD has no units. Its `clean` draws the model
+alone, for a document. Neither changes a default result.
 
 ### Recipes
 
@@ -531,7 +589,7 @@ output's directory is created.
 ## Safety
 
 - **Files:** the allowed roots are the working directory and each
-  `--root`, read and write; the library path (`OPENSCADPATH`, the user
+  `--root`, read and write, and the temp directories below; the library path (`OPENSCADPATH`, the user
   library directory) and font directories are readable, and so is the
   directory of each document open in a connected NeoSCAD app, while it
   is open ("The desktop apps").
@@ -565,6 +623,26 @@ output's directory is created.
   itself is fenced (`mcp::roots::RootedFs`), so a model's `include`,
   `use`, `import()` or `surface()` cannot read outside them either: the
   file simply cannot be opened.
+- **The temp directories.** Agents keep scratch files in a temp
+  directory (Claude Code's is `/tmp/claude-<uid>`), and an export there
+  was refused. Unless the server runs with `--no-temp`, the user's temp
+  directory (`std::env::temp_dir()`: `$TMPDIR`, per user on macOS,
+  `/var/folders/.../T`; `%TEMP%` on Windows) and its subfolders are read
+  and write too, unless it is itself a folder the list above refuses
+  (`TMPDIR=/` or the home folder). A shared temp directory (`/tmp`,
+  `/var/tmp`, and `$TMPDIR` when it is one of them, as on Linux) is not:
+  every user writes there, and another could plant a file or a link. In
+  one only a folder directly in it is allowed, and only while it is a
+  real directory owned by the user and not writable by group or others
+  (`mcp::roots::private_folder`), as `/tmp/claude-<uid>` (mode 0700) is;
+  a folder that does not exist yet is refused, since it would be
+  created with the user's umask. As everywhere, paths are judged where
+  they resolve, so a link in the temp directory that leads out is
+  refused. What this allows beyond the roots is reading and writing the
+  user's own temp files, within the output rules below (an export
+  format's extension, never replacing a file of another type, `overwrite`
+  for one of the same); the relative paths' base and the refusals'
+  advice do not change, and a refusal lists the temp directories.
 - **Outputs never replace other files:** `render`'s `export` must have
   an export format's extension and `snapshot`'s `output` must be a
   `.png`. An existing file whose extension is not the output's (a
