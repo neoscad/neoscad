@@ -1,9 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 ### New
 
+- **Project dependencies.** A `scad.toml` beside a model names the
+  libraries it uses, from git (by tag, branch or commit) or a local path,
+  and `scad.lock` pins each one to a commit and a content hash.
+  `neoscad add BOSL2 --git https://github.com/BelfrySCAD/BOSL2 --tag
+  v2.0.716` is all it takes: `include <BOSL2/std.scad>` then finds the
+  pinned copy, with no change to the source. Each revision is checked
+  out once per machine into a shared store and linked into every project
+  that uses it, and every fetch checks its hash. The command line, the
+  apps, `serve`, MCP and the language server all resolve through it; a
+  file outside a project resolves as before (`docs/dependencies.md`).
+- **Where a part ends up.** With `--enable query`, `world_transform()`
+  returns the matrix of every transform around a statement and
+  `to_world(p)` maps a point into the model's coordinates, so a library
+  can report where its parts land for cut lists and drawings.
+- **Sketch `polyline()`.** With `--enable sketch`, `polyline(points,
+  closed, constrain)` makes the points and the lines between them, and
+  can dimension every edge as drawn (`constrain = "edges"`) or fix the
+  shape exactly (`"fixed"`). A zero-length edge is a clear
+  `sketch-zero-length` error naming the points.
+- **`$neoscad_features`** lists the NeoSCAD extensions that are on, so a
+  library can use them under NeoSCAD and fall back in OpenSCAD.
+- **Parts as layers in SVG and DXF.** With `--enable part`, a 2D export
+  writes each `part()` as its own SVG group or DXF layer, in its colour,
+  instead of one merged outline, so a drawing keeps the boundaries
+  between touching members. `import(..., id =)` and `import(...,
+  layer =)` read a part back.
 - **Agents can model things that are not printed.** MCP `check` takes
   `printability: false`: the 3D-printing findings (floating pieces, thin
   walls, overhangs, off the bed, bed fit, cavities, touching surfaces)
@@ -27,10 +53,16 @@
 
 ### Changed
 
+- **Open OpenSCAD files with NeoSCAD.** The macOS and Linux apps offer
+  once to become the default app for `.scad` files ("Not Now" asks again
+  next launch, "Don't ask again" never does), and Settings (Preferences
+  on Linux) > General shows the state with a "Make Default" button.
 - On macOS, `NeoSCAD.app/Contents/MacOS/NeoSCAD --help` (or
   `--version`) prints the command line's help (or version) and exits
   instead of opening the app, and an app's MCP server names its CLI,
   `Contents/Helpers/neoscad`, in its instructions.
+- `neoscad --help` says that `-q` leaves only errors in an echo export,
+  as OpenSCAD's does.
 
 ## 0.6.2
 
