@@ -20,6 +20,7 @@
 
 #[cfg(feature = "cli")]
 pub mod cli;
+mod env;
 mod error;
 pub mod git;
 pub mod hash;

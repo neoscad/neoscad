@@ -17,7 +17,10 @@ use crate::error::{Error, Result, bail};
 
 /// The environment variable naming the git executable (default `git` on
 /// the `PATH`).
-pub const GIT_ENV: &str = "NEOSCAD_GIT";
+pub const GIT_ENV: &str = "SCAD_GIT";
+
+/// An alias of [`GIT_ENV`], read when that is unset.
+pub const GIT_ENV_ALIAS: &str = "NEOSCAD_GIT";
 
 /// How to run git.
 #[derive(Debug, Clone)]
@@ -28,11 +31,10 @@ pub struct Git {
 }
 
 impl Git {
-    /// `NEOSCAD_GIT`, else `git`. `empty_config` is an empty file that
+    /// [`GIT_ENV`], else [`GIT_ENV_ALIAS`], else `git`. `empty_config` is an empty file that
     /// stands in for the user's configuration while a tree is written.
     pub fn new(empty_config: PathBuf) -> Git {
-        let exe = std::env::var_os(GIT_ENV)
-            .filter(|v| !v.is_empty())
+        let exe = crate::env::var(&[GIT_ENV, GIT_ENV_ALIAS])
             .map_or_else(|| PathBuf::from("git"), PathBuf::from);
         Git { exe, empty_config }
     }

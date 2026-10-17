@@ -93,8 +93,9 @@ struct Common {
     #[arg(long, value_name = "DIR")]
     project: Option<PathBuf>,
 
-    /// The store of shared mirrors and checkouts (default: NEOSCAD_STORE,
-    /// else the platform's cache directory; `store path` prints it).
+    /// The store of shared mirrors and checkouts (default: SCAD_STORE, else
+    /// NEOSCAD_STORE, else the platform's cache directory; `store path`
+    /// prints it).
     #[arg(long, value_name = "DIR")]
     store: Option<PathBuf>,
 
@@ -238,8 +239,8 @@ struct StoreArgs {
     #[command(subcommand)]
     what: StoreCmd,
 
-    /// The store (default: NEOSCAD_STORE, else the platform's cache
-    /// directory).
+    /// The store (default: SCAD_STORE, else NEOSCAD_STORE, else the
+    /// platform's cache directory).
     #[arg(long, value_name = "DIR", global = true)]
     store: Option<PathBuf>,
 

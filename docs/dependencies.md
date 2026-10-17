@@ -15,7 +15,9 @@ manifest's `[paths]` table. The code is the `scad-deps` crate
 own so that stock-OpenSCAD users and other tools share the same files
 and store: its standalone `scad-deps` binary (`cargo install scad-deps
 --features cli`) has the same commands as `neoscad`, which runs
-`scad_deps::cli` under its own name (`crates/cli/src/pkg.rs`).
+`scad_deps::cli` under its own name (`crates/cli/src/pkg.rs`). Unlike
+the rest of NeoSCAD (GPL-2.0-or-later), the crate is MIT-licensed, so it
+can be used by tools under any licence.
 
 **The formats are specified in the crate's README,
 [`crates/project/README.md`](../crates/project/README.md)**: the
@@ -166,8 +168,9 @@ the folder can be committed or archived for an air-gapped build.
 
 Every revision is fetched and checked out once per machine, then linked
 into each project that uses it; the README specifies the layout, the
-names and the platform locations (`NEOSCAD_STORE` or `--store` moves it;
-`neoscad store path` prints it). The choices behind it:
+names and the platform locations (`--store`, `SCAD_STORE` or its older
+alias `NEOSCAD_STORE` moves it, in that order; `neoscad store path`
+prints it). The choices behind it:
 
 - **Mirrors** are like Cargo's git database: one bare repository per
   remote, so a later revision costs a `git fetch` of the delta.
@@ -188,6 +191,11 @@ names and the platform locations (`NEOSCAD_STORE` or `--store` moves it;
   project links; `neoscad store gc` removes what no live project lists.
 - **Links**: symbolic links, and on Windows a directory junction (no
   privilege needed) where symbolic links are not allowed, else a copy.
+- **Names**: the variables are tool-neutral (`SCAD_STORE`, `SCAD_GIT`),
+  so that any tool implementing the format can share one store; the
+  first names, `NEOSCAD_STORE` and `NEOSCAD_GIT`, still work as aliases
+  read after them. The default folder keeps NeoSCAD's name, since
+  renaming it would orphan every existing store.
 
 ### Resolution
 

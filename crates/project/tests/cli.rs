@@ -137,8 +137,10 @@ impl Env {
         let mut c = Command::new(BIN);
         c.args(args)
             .current_dir(dir)
-            .env("NEOSCAD_STORE", &self.store)
+            .env("SCAD_STORE", &self.store)
+            .env_remove("NEOSCAD_STORE")
             .env_remove("OPENSCADPATH")
+            .env_remove("SCAD_GIT")
             .env_remove("NEOSCAD_GIT")
             .stdin(Stdio::null());
         for (k, v) in env {
@@ -238,7 +240,7 @@ fn add_fetches_locks_and_links() {
     );
     assert_eq!(linked(&app), lib_v("v1"));
     // A second fetch only checks the links: no git at all.
-    let o = env.run_with(&app, &["fetch"], &[("NEOSCAD_GIT", "/nonexistent/git")]);
+    let o = env.run_with(&app, &["fetch"], &[("SCAD_GIT", "/nonexistent/git")]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
     assert!(
         text(&o.stderr).contains("up to date"),
@@ -601,7 +603,7 @@ fn gc_keeps_what_projects_use() {
     let after = env.json(&a, &["store", "list"]);
     assert_eq!(after["entries"].as_array().unwrap().len(), 2, "{after}");
     // a still fetches, with no git.
-    let o = env.run_with(&a, &["fetch"], &[("NEOSCAD_GIT", "/nonexistent/git")]);
+    let o = env.run_with(&a, &["fetch"], &[("SCAD_GIT", "/nonexistent/git")]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
     assert_eq!(linked(&a), lib_v("v1"));
     // A removed dependency's checkout is unused after the next fetch.
@@ -610,6 +612,80 @@ fn gc_keeps_what_projects_use() {
     assert_eq!(r["removed"].as_array().unwrap().len(), 2, "{r}");
     let path = env.ok(&a, &["store", "path"]);
     assert_eq!(text(&path.stdout), format!("{}\n", env.store.display()));
+}
+
+/// `--store` beats `SCAD_STORE`, which beats its alias `NEOSCAD_STORE`
+/// (an empty variable counts as unset); `SCAD_GIT` beats `NEOSCAD_GIT`.
+#[test]
+fn store_and_git_variables_and_their_aliases() {
+    let base = scratch("env");
+    let store_path = |vars: &[(&str, &str)], flag: Option<&str>| {
+        let mut c = Command::new(BIN);
+        c.args(["store", "path"])
+            .current_dir(&*base)
+            .env_remove("SCAD_STORE")
+            .env_remove("NEOSCAD_STORE")
+            .stdin(Stdio::null());
+        if let Some(f) = flag {
+            c.args(["--store", f]);
+        }
+        for (k, v) in vars {
+            c.env(k, v);
+        }
+        let o = c.output().unwrap();
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+        PathBuf::from(text(&o.stdout).trim_end())
+    };
+    let neutral = base.join("neutral");
+    let alias = base.join("alias");
+    let flag = base.join("flag");
+    let (n, a, f) = (
+        neutral.to_str().unwrap(),
+        alias.to_str().unwrap(),
+        flag.to_str().unwrap(),
+    );
+    let both = [("SCAD_STORE", n), ("NEOSCAD_STORE", a)];
+    assert_eq!(store_path(&both, Some(f)), flag);
+    assert_eq!(store_path(&both, None), neutral);
+    assert_eq!(store_path(&[("NEOSCAD_STORE", a)], None), alias);
+    assert_eq!(
+        store_path(&[("SCAD_STORE", ""), ("NEOSCAD_STORE", a)], None),
+        alias
+    );
+    assert_ne!(store_path(&[], None), neutral);
+
+    // git: the first fetch has to clone, so it runs whichever git wins.
+    let env = Env::new(&base);
+    let u = repo(&base.join("lib"), &[("x.scad", &lib_v("v1"))], "v1");
+    let app = project(&base, "app");
+    std::fs::write(
+        app.join("scad.toml"),
+        format!("[dependencies]\nLib = {{ git = \"{u}\", tag = \"v1\" }}\n"),
+    )
+    .unwrap();
+    let fetch_fails_with = |vars: &[(&str, &str)], exe: &str| {
+        let o = env.run_with(&app, &["fetch"], vars);
+        assert_ne!(o.status.code(), Some(0));
+        assert!(
+            text(&o.stderr).contains(&format!("cannot run git ({exe}")),
+            "{}",
+            text(&o.stderr)
+        );
+    };
+    fetch_fails_with(
+        &[("SCAD_GIT", "/nonexistent/neutral"), ("NEOSCAD_GIT", "git")],
+        "/nonexistent/neutral",
+    );
+    fetch_fails_with(
+        &[("NEOSCAD_GIT", "/nonexistent/alias")],
+        "/nonexistent/alias",
+    );
+    fetch_fails_with(
+        &[("SCAD_GIT", ""), ("NEOSCAD_GIT", "/nonexistent/alias")],
+        "/nonexistent/alias",
+    );
+    env.ok(&app, &["fetch"]);
+    assert_eq!(linked(&app), lib_v("v1"));
 }
 
 #[test]
@@ -634,7 +710,8 @@ fn concurrent_fetches_share_the_store() {
             Command::new(BIN)
                 .args(["fetch", "--format", "json"])
                 .current_dir(p)
-                .env("NEOSCAD_STORE", &env.store)
+                .env("SCAD_STORE", &env.store)
+                .env_remove("NEOSCAD_STORE")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()

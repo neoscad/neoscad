@@ -296,11 +296,13 @@ fn environment() -> Roff {
         (
             scad_deps::store::STORE_ENV,
             "The store of shared git mirrors and dependency checkouts, instead of the \
-             platform's cache directory (neoscad store path prints it).",
+             platform's cache directory (neoscad store path prints it). NEOSCAD_STORE, \
+             its older name, is read when it is unset; --store overrides both.",
         ),
         (
             scad_deps::git::GIT_ENV,
-            "The git executable that neoscad fetch runs, instead of git on the PATH.",
+            "The git executable that neoscad fetch runs, instead of git on the PATH. \
+             NEOSCAD_GIT, its older name, is read when it is unset.",
         ),
         (
             "OPENSCAD_FONT_PATH",

@@ -3025,10 +3025,6 @@ From the dependency manager (`docs/dependencies.md`, issue #1).
 - scad-deps is meant to move to its own repository (as sketch-solver
   did), with NeoSCAD depending on it from crates.io; `crates/project` is
   self-contained for that (its own version, licence, lints and tests).
-- The store's environment variables and default folder carry NeoSCAD's
-  name (`NEOSCAD_STORE`, `NEOSCAD_GIT`, `~/Library/Caches/NeoSCAD/store`)
-  although scad-deps is tool-agnostic; a neutral alias (`SCAD_STORE`)
-  read as well would keep one store shared by every tool.
 - The Windows links (directory symbolic link, then junction, then copy)
   compile and are reasoned through but are not yet exercised by CI on
   Windows.

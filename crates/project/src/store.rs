@@ -13,8 +13,8 @@
 //!   empty-gitconfig                     the configuration checkouts see
 //! ```
 //!
-//! `<store>` is `NEOSCAD_STORE` or `--store`, else the platform's cache
-//! directory: `~/Library/Caches/NeoSCAD/store` on macOS,
+//! `<store>` is `--store`, else `SCAD_STORE`, else `NEOSCAD_STORE` (an
+//! alias), else the platform's cache directory: `~/Library/Caches/NeoSCAD/store` on macOS,
 //! `$XDG_CACHE_HOME/neoscad/store` (`~/.cache/neoscad/store`) on Linux and
 //! `%LOCALAPPDATA%\NeoSCAD\store` on Windows.
 //!
@@ -37,7 +37,11 @@ use crate::hash::digest;
 use crate::manifest::{MANIFEST, quote};
 
 /// The environment variable that moves the store.
-pub const STORE_ENV: &str = "NEOSCAD_STORE";
+pub const STORE_ENV: &str = "SCAD_STORE";
+
+/// An alias of [`STORE_ENV`], read when that is unset: the store's first
+/// name, which keeps working.
+pub const STORE_ENV_ALIAS: &str = "NEOSCAD_STORE";
 
 /// An open store.
 #[derive(Debug, Clone)]
@@ -62,13 +66,18 @@ pub fn default_root() -> Option<PathBuf> {
     })
 }
 
-/// The store's location: `explicit`, else `NEOSCAD_STORE`, else
-/// [`default_root`].
+/// The store's location: `explicit`, else [`STORE_ENV`], else
+/// [`STORE_ENV_ALIAS`], else [`default_root`].
 pub fn locate(explicit: Option<&Path>) -> Result<PathBuf> {
+    locate_in(explicit, crate::env::var(&[STORE_ENV, STORE_ENV_ALIAS]))
+}
+
+/// [`locate`], given what the environment says (`from_env`).
+fn locate_in(explicit: Option<&Path>, from_env: Option<std::ffi::OsString>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         return Ok(absolute(p));
     }
-    if let Some(p) = std::env::var_os(STORE_ENV).filter(|v| !v.is_empty()) {
+    if let Some(p) = from_env {
         return Ok(absolute(Path::new(&p)));
     }
     match default_root() {
@@ -566,5 +575,40 @@ mod tests {
         assert_eq!(normalize_url("file:///tmp/x/repo"), "file:///tmp/x/repo");
         assert_eq!(label("https://github.com/BelfrySCAD/BOSL2"), "BOSL2");
         assert_eq!(label("git@github.com:a/B"), "B");
+    }
+
+    /// `--store`, then `SCAD_STORE`, then the `NEOSCAD_STORE` alias, then
+    /// the cache directory; an empty variable counts as unset.
+    #[test]
+    fn store_location_precedence() {
+        let env = |vars: &[(&str, &str)]| {
+            let found = crate::env::lookup(&[STORE_ENV, STORE_ENV_ALIAS], |n| {
+                vars.iter()
+                    .find(|(k, _)| *k == n)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            });
+            locate_in(None, found).ok()
+        };
+        let at = |p: &str| Some(absolute(Path::new(p)));
+        let both = [(STORE_ENV, "/neutral"), (STORE_ENV_ALIAS, "/alias")];
+        assert_eq!(env(&both), at("/neutral"));
+        assert_eq!(env(&[(STORE_ENV_ALIAS, "/alias")]), at("/alias"));
+        assert_eq!(
+            env(&[(STORE_ENV, ""), (STORE_ENV_ALIAS, "/alias")]),
+            at("/alias")
+        );
+        assert_eq!(env(&[]), default_root());
+        assert_eq!(
+            locate_in(Some(Path::new("/flag")), Some("/neutral".into())).ok(),
+            at("/flag")
+        );
+        assert_eq!(
+            (STORE_ENV, STORE_ENV_ALIAS),
+            ("SCAD_STORE", "NEOSCAD_STORE")
+        );
+        assert_eq!(
+            (crate::git::GIT_ENV, crate::git::GIT_ENV_ALIAS),
+            ("SCAD_GIT", "NEOSCAD_GIT")
+        );
     }
 }

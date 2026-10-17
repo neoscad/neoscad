@@ -269,11 +269,19 @@ notices a moved one).
 
 There is one store per machine, shared by every project and every tool
 that implements this format. It lives in `--store DIR`, else in
-`NEOSCAD_STORE`, else in the platform's cache directory:
+`SCAD_STORE`, else in `NEOSCAD_STORE` (the variable's first name, kept as
+an alias), else in the platform's cache directory:
 `~/Library/Caches/NeoSCAD/store` on macOS, `$XDG_CACHE_HOME/neoscad/store`
 (by default `~/.cache/neoscad/store`) on Linux, and
-`%LOCALAPPDATA%\NeoSCAD\store` on Windows. `NEOSCAD_GIT` names the git
-executable (default: `git` on the `PATH`).
+`%LOCALAPPDATA%\NeoSCAD\store` on Windows. `SCAD_GIT`, else its alias
+`NEOSCAD_GIT`, names the git executable (default: `git` on the `PATH`).
+A variable set to the empty string counts as unset.
+
+The default folder keeps NeoSCAD's name although the format is
+tool-neutral: it is where the first implementation put the store, and
+renaming it would leave every existing store behind, to be fetched
+again. A tool that implements this format uses the same folder, so one
+store serves all of them.
 
 ```text
 <store>/
@@ -342,4 +350,6 @@ and `checkout-index` runs no git hooks.
 
 ## License
 
-GPL-2.0-or-later, like NeoSCAD (see `LICENSE`).
+MIT (see `LICENSE`). The rest of NeoSCAD is GPL-2.0-or-later; this crate
+depends on nothing under the GPL, so it can be used, and moved to its
+own repository, under the MIT licence alone.

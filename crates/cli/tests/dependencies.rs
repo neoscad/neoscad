@@ -140,8 +140,10 @@ impl Env {
         c.args(args)
             .current_dir(dir)
             .env("NEOSCAD_NO_SERVER", "1")
-            .env("NEOSCAD_STORE", &self.store)
+            .env("SCAD_STORE", &self.store)
+            .env_remove("NEOSCAD_STORE")
             .env_remove("OPENSCADPATH")
+            .env_remove("SCAD_GIT")
             .env_remove("NEOSCAD_GIT")
             .stdin(Stdio::null());
         for (k, v) in env {
