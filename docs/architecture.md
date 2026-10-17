@@ -69,7 +69,13 @@ The workspace is every directory under `crates/` (`Cargo.toml`,
   `neoscad-agent-link`: per-user sockets and named pipes with owner
   checks, shared by `neoscad serve --socket` and the desktop apps' live
   agent link, which `neoscad mcp` finds by itself;
-  `docs/agent-bridge.md`, "Desktop apps").
+  `docs/agent-bridge.md`, "Desktop apps") · `project` (package
+  `neoscad-project`: project dependencies, `scad.toml` and `scad.lock`,
+  resolution, the per-machine store of git mirrors and read-only
+  checkouts, the project's `.scad/libraries` links, and the search path
+  a project gives a file, which hosts hand the session through
+  `session::Config::project` as a `lang::project::ProjectLibs`;
+  `docs/dependencies.md`).
 - **Tooling:** `wasm-check` (a wasm32 build of the pipeline, run in node
   by `scripts/wasm-check.sh`) · `uniffi-bindgen` (the Swift bindings
   generator pinned to `ffi`'s UniFFI, run by
