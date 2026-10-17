@@ -1,0 +1,25 @@
+polygon(points = [[0, 0], [40, 0], [40, 10], [25, 30], [0, 30]], paths = undef, convexity = 1);
+multmatrix([[1, 0, 0, 60], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	polygon(points = [[0, 0], [40, 0], [40, 9], [39.846, 9.94868], [39.4, 10.8], [25, 30], [0, 30]], paths = undef, convexity = 1);
+}
+multmatrix([[1, 0, 0, 0], [0, 1, 0, 50], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	polygon(points = [[0, 0], [20, 0], [20, 10], [0, 10]], paths = undef, convexity = 1);
+}
+multmatrix([[1, 0, 0, 60], [0, 1, 0, 50], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	polygon(points = [], paths = undef, convexity = 1);
+}
+multmatrix([[1, 0, 0, 0], [0, 1, 0, 100], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	polygon(points = [[0, 0], [40, 0], [40, 10], [25, 30], [0, 30]], paths = undef, convexity = 1);
+}
+multmatrix([[1, 0, 0, 60], [0, 1, 0, 100], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	polygon(points = [], paths = undef, convexity = 1);
+}
+multmatrix([[1, 0, 0, 0], [0, 1, 0, 150], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	polygon(points = [[0, 0], [10, 0], [10, 10]], paths = undef, convexity = 1);
+}
+polygon(points = [], paths = undef, convexity = 1);
+polygon(points = [], paths = undef, convexity = 1);
+polygon(points = [], paths = undef, convexity = 1);
+polygon(points = [], paths = undef, convexity = 1);
+polygon(points = [], paths = undef, convexity = 1);
+

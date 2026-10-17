@@ -316,6 +316,10 @@ pub struct BuiltinName {
 
 /// The special variables and constants every evaluation starts with, or
 /// that module calls set (`$children`, `$parent_modules`).
+/// NeoSCAD's `$neoscad_features`: the names of the extensions on, bound
+/// only when at least one is (`Evaluator::run`).
+pub const NEOSCAD_FEATURES: &str = "$neoscad_features";
+
 pub const BUILTIN_VARIABLES: [&str; 12] = [
     "$fn",
     "$fa",
@@ -380,6 +384,8 @@ pub fn builtins() -> Vec<BuiltinName> {
         "child_bounds",
         "child_measure",
         "child_distance",
+        "world_transform",
+        "to_world",
     ] {
         out.push(BuiltinName {
             name,
@@ -399,6 +405,11 @@ pub fn builtins() -> Vec<BuiltinName> {
         kind: Function,
         status: status(b.enabled(Features::NONE)),
     }));
+    out.push(BuiltinName {
+        name: NEOSCAD_FEATURES,
+        kind: Variable,
+        status: BuiltinStatus::Extension,
+    });
     out.extend(BUILTIN_VARIABLES.iter().map(|n| BuiltinName {
         name: n,
         kind: Variable,

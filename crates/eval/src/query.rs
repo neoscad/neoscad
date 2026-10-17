@@ -168,6 +168,91 @@ impl Evaluator<'_> {
         }
     }
 
+    // --- world_transform() and to_world() -------------------------------------
+
+    /// The product of the transforms around the statement running now: the
+    /// nodes being filled, outermost first, each placing its children by
+    /// [`own_matrix`] (the rule `child_anchors()` carries anchors by). The
+    /// node a transform's arguments are evaluated for is not yet on the
+    /// stack, so they are in the frame around it, as OpenSCAD evaluates
+    /// them. `Err` names the node that places its children by their
+    /// geometry, so has no matrix here.
+    fn current_transform(&self) -> Result<Matrix, &'static str> {
+        let mut m = IDENTITY;
+        for n in &self.heap_nodes {
+            let own = own_matrix(n).ok_or(match n.kind {
+                NodeKind::Resize { .. } => "resize()",
+                NodeKind::RotateExtrude { .. } => "rotate_extrude()",
+                _ => "a transform with a non-finite entry",
+            })?;
+            if own != IDENTITY {
+                m = mul(&m, &own);
+            }
+        }
+        Ok(m)
+    }
+
+    /// The transform for `world_transform()` and `to_world()`, or `None`
+    /// with a warning. Reading it marks the statement untracked: the answer
+    /// depends on where the statement runs, which no memo key covers (a
+    /// module call replayed under another `translate()`, or a query's
+    /// instance of a child put in place by a later `children()`).
+    fn world_matrix(&mut self, fname: &str, loc: Loc) -> Option<Matrix> {
+        self.untracked();
+        match self.current_transform() {
+            Ok(m) => Some(m),
+            Err(what) => {
+                let t = format!(
+                    "{fname}(): {what} around this point places its children by their geometry, so there is no matrix for it; the answer is undef"
+                );
+                self.warn(loc, DiagCode::QueryNoTransform, t);
+                None
+            }
+        }
+    }
+
+    /// `world_transform()`: the 4x4 matrix that maps this point's
+    /// coordinates to the model's (top-level) coordinates.
+    pub(crate) fn world_transform(&mut self, a: &mut Vec<ArgVal>, loc: Loc) -> Value {
+        let _ = self.bind_builtin(std::mem::take(a), loc, &[], &[], true);
+        let Some(m) = self.world_matrix("world_transform", loc) else {
+            return Value::Undef;
+        };
+        Value::vector(m.iter().map(|row| numbers(&row.map(unsigned))).collect())
+    }
+
+    /// `to_world(p)`: point `p` (`[x, y]` or `[x, y, z]`), or each point of
+    /// a list of them, in the model's coordinates, as `[x, y, z]`.
+    pub(crate) fn world_point(&mut self, a: &mut Vec<ArgVal>, loc: Loc) -> Value {
+        let syms = [self.syms.intern("p")];
+        let vars = self.bind_builtin(std::mem::take(a), loc, &syms, &[], true);
+        let p = vars.get(syms[0]).cloned().unwrap_or_default();
+        let one = coords(&p);
+        let many = match (&one, &p) {
+            (None, Value::Vector(v)) if !v.as_slice().is_empty() => {
+                v.as_slice().iter().map(coords).collect::<Option<Vec<_>>>()
+            }
+            _ => None,
+        };
+        if one.is_none() && many.is_none() {
+            let mut t =
+                b"to_world(): p must be [x, y], [x, y, z] or a list of them, found ".to_vec();
+            self.write_echo_nothrow(&p, &mut t);
+            t.extend_from_slice(b"; the answer is undef");
+            self.warn(loc, DiagCode::InvalidArgument, t);
+            return Value::Undef;
+        }
+        let Some(m) = self.world_matrix("to_world", loc) else {
+            return Value::Undef;
+        };
+        let map = |q: [f64; 3]| numbers(&apply(&m, q).map(unsigned));
+        match (one, many) {
+            (Some(q), _) => map(q),
+            (None, Some(qs)) => Value::vector(qs.into_iter().map(map).collect()),
+            (None, None) => unreachable!("checked above"),
+        }
+    }
+
     // --- child_anchors() ----------------------------------------------------
 
     /// `child_anchors(index)`: an object from each anchor name in what
@@ -822,12 +907,22 @@ fn collect_anchors(top: &Node, out: &mut Vec<Anchor>) {
     }
 }
 
+/// Point `p` moved by `m`, as [`place`] moves an anchor's point.
+fn apply(m: &Matrix, p: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2] + m[r][3])
+}
+
+/// `x` with a negative zero made positive, so a mirrored frame's zeros
+/// print as `0`, not `-0`.
+fn unsigned(x: f64) -> f64 {
+    x + 0.0
+}
+
 /// `a` moved by `m`: its point as a point, its direction as a direction
 /// (the linear part alone), scaled to unit length. A direction the matrix
 /// flattens to nothing (a projection of a vertical one) is dropped.
 fn place(a: &Anchor, m: &Matrix) -> Anchor {
-    let p = a.point;
-    let point = std::array::from_fn(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2] + m[r][3]);
+    let point = apply(m, a.point);
     let dir = a.dir.and_then(|d| {
         let v: [f64; 3] = std::array::from_fn(|r| m[r][0] * d[0] + m[r][1] * d[1] + m[r][2] * d[2]);
         let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();

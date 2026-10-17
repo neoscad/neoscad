@@ -6,7 +6,9 @@ A geometry query lets a module ask about its own children while the
 program runs: their bounding box (`child_bounds()`), their volume, area
 and size (`child_measure()`), the distance between two of them
 (`child_distance()`), or the named points they declare (`anchor()` and
-`child_anchors()`). The answers are ordinary numbers, so
+`child_anchors()`); and any statement can ask where it is in the
+model (`world_transform()` and `to_world()`). The answers are ordinary
+numbers, so
 a module can size a base plate to its child, put a hole beside it, or
 centre it, which plain OpenSCAD cannot do without the numbers being
 typed in by hand.
@@ -22,6 +24,7 @@ Contents:
 - [child_measure(): volume, area, size and centre](#child_measure-volume-area-size-and-centre)
 - [child_distance(): the gap between two children](#child_distance-the-gap-between-two-children)
 - [anchor() and child_anchors(): named points](#anchor-and-child_anchors-named-points)
+- [world_transform() and to_world(): where a statement is in the model](#world_transform-and-to_world-where-a-statement-is-in-the-model)
 - [Evaluation order and cost](#evaluation-order-and-cost)
 - [Preview and render](#preview-and-render)
 - [Limits and diagnostics](#limits-and-diagnostics)
@@ -36,8 +39,9 @@ checks that it gives exactly the output shown with it.
 ## OpenSCAD superset: turning queries on
 
 Queries are off by default, and off a file means exactly what it means
-in OpenSCAD: `child_bounds()`, `child_measure()`, `child_distance()` and
-`child_anchors()` are unknown functions and `anchor()` an unknown module, with OpenSCAD's
+in OpenSCAD: `child_bounds()`, `child_measure()`, `child_distance()`,
+`child_anchors()`, `world_transform()` and `to_world()` are unknown
+functions and `anchor()` an unknown module, with OpenSCAD's
 own warnings. A program's own definitions of those names win, on or off.
 Turn queries on with:
 
@@ -57,6 +61,14 @@ Turn queries on with:
 Nothing is new syntax: the queries are functions and `anchor()` is a
 module, so a file parses, formats and prints its `.ast` the same with
 the extension on or off.
+
+A library that should also run in OpenSCAD tests for the extension with
+`$neoscad_features`, the list of NeoSCAD extensions on (unbound, as in
+OpenSCAD, when none is), and keeps a typed-in size for the other branch:
+`!is_undef($neoscad_features) && [for (f = $neoscad_features) if (f ==
+"query") f] != []` is `false` in stock OpenSCAD, with no warning
+(`neoscad docs '$neoscad_features'`; `docs/sketch.md` has a worked
+example).
 
 ## Quick start
 
@@ -229,6 +241,60 @@ sketch`) exports every entity its body names as an anchor
 (`docs/sketch.md`). `neoscad docs anchor` and `neoscad docs
 child_anchors` have the details.
 
+## world_transform() and to_world(): where a statement is in the model
+
+`world_transform()` is the 4x4 matrix of every transform around the
+statement running now, outermost first: those written around it,
+around the call of the module it is in, and around the `children()`
+that put it in place. It maps the current coordinates to the model's
+top-level ones, in the form `multmatrix()` takes. `to_world(p)` applies
+it to a point, `[x, y]` (z = 0) or `[x, y, z]`, or to each point of a
+list, and gives `[x, y, z]`. No rendering is involved; they cost a
+matrix product per enclosing transform.
+
+They are for a library module that has to report where the parts it
+makes end up, whatever its caller wrote around it: a cut list or a
+construction drawing of framing members placed with ordinary
+`translate()`, `rotate()` and `mirror()`, instead of a matrix threaded
+through every call by hand.
+
+```openscad
+module stick(tag, s) {
+  echo(tag, from = to_world([0, 0, 0]), to = to_world(s));
+  cube(s);
+}
+module wall(x) translate([x, 0, 0]) children();
+translate([10, 20, 30]) mirror([1, 0, 0]) rotate([0, 0, 90]) stick("post", [2, 4, 6]);
+wall(100) for (i = [0:1]) translate([0, i * 40, 0]) stick(str("stud ", i), [2, 4, 90]);
+```
+
+```text
+ECHO: "post", from = [10, 20, 30], to = [14, 22, 36]
+ECHO: "stud 0", from = [100, 0, 0], to = [102, 4, 90]
+ECHO: "stud 1", from = [100, 40, 0], to = [102, 44, 90]
+```
+
+The matrix follows the rule anchors follow: `translate`, `rotate`,
+`scale`, `mirror` and `multmatrix` are their matrices, a centred
+`linear_extrude` moves its profile down by half its height and
+`projection` flattens z; the other operations (`color`, booleans,
+`render`, an uncentred `linear_extrude`, `offset`, `hull`) keep
+coordinates. Under `resize()`, which scales by its child's rendered
+size, and `rotate_extrude()`, which sweeps its profile, there is no
+matrix: the answer is `undef` with a `query-no-transform` warning. A
+transform's own arguments are evaluated outside it, as in OpenSCAD, so
+`translate(to_world([0, 0, 0]))` reads the frame around the
+`translate`. Negative zeros print as `0`.
+
+A statement or module call that reads its transform is never replayed
+from a memo (the replay of repeated module calls, or the incremental
+evaluation of the apps and the language server), since the same call
+under another `translate()` has another answer; the rest of the model
+is still replayed. Inside a child that a query instantiates early
+(`child_bounds()` and the others), the answer is the query's place, and
+a later `children()` instantiates that child again where it goes, so
+what it echoes there is right.
+
 ## Evaluation order and cost
 
 OpenSCAD evaluates the whole program into a tree first and renders it
@@ -309,6 +375,7 @@ renders nothing and does not count.
 | `query-outside-module` | warning | a query outside any module body; the answer is `undef` |
 | `query-index` | warning | an index out of range or not a number, with `children()`'s text; the answer is `undef` |
 | `query-duplicate-anchor` | warning | two anchors of one name among the children; the first wins |
+| `query-no-transform` | warning | `world_transform()` or `to_world()` under `resize()` or `rotate_extrude()`, which place their children by geometry; the answer is `undef` |
 | `resource-limit` | error | a limit passed, by the query count or by the child's render |
 
 An error in the child stops evaluation at the query, as it would at

@@ -1,0 +1,73 @@
+multmatrix([[1, 0, 0, 10], [0, 1, 0, 20], [0, 0, 1, 30], [0, 0, 0, 1]]) {
+	multmatrix([[-1, -0, -0, 0], [-0, 1, -0, 0], [-0, -0, 1, 0], [0, 0, 0, 1]]) {
+		multmatrix([[0, -1, 0, 0], [1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+			group() {
+				cube(size = [2, 4, 6], center = false);
+			}
+		}
+	}
+}
+group() {
+	multmatrix([[1, 0, 0, 100], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+		group() {
+			group() {
+				multmatrix([[1, -0, -0, 0], [-0, -1, -0, 0], [-0, -0, 1, 0], [0, 0, 0, 1]]) {
+					group() {
+						group() {
+							multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+								multmatrix([[0, 0, -1, 0], [0, 1, -0, 0], [1, 0, -0, 0], [0, 0, 0, 1]]) {
+									group() {
+										cube(size = [2, 4, 90], center = false);
+									}
+								}
+							}
+							multmatrix([[1, 0, 0, 0], [0, 1, 0, 40], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+								multmatrix([[0, 0, -1, 0], [0, 1, -0, 0], [1, 0, -0, 0], [0, 0, 0, 1]]) {
+									group() {
+										cube(size = [2, 4, 90], center = false);
+									}
+								}
+							}
+							multmatrix([[1, 0, 0, 0], [0, 1, 0, 80], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+								multmatrix([[0, 0, -1, 0], [0, 1, -0, 0], [1, 0, -0, 0], [0, 0, 0, 1]]) {
+									group() {
+										cube(size = [2, 4, 90], center = false);
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+multmatrix([[1, 0, 0, 5], [0, 2, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+	multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 3, 0], [0, 0, 0, 1]]);
+}
+linear_extrude(height = 10, center = true, $fn = 0, $fa = 12, $fs = 2) {
+	square(size = [1, 1], center = false);
+}
+projection(cut = false, convexity = 0) {
+	multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 7], [0, 0, 0, 1]]) {
+		cube(size = [1, 1, 1], center = false);
+	}
+}
+group() {
+	multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 50], [0, 0, 0, 1]]) {
+		group() {
+			group() {
+				cube(size = [1, 1, 1], center = false);
+			}
+		}
+	}
+}
+resize(newsize = [5,5,5], auto = [0,0,0], convexity = 0) {
+	cube(size = [1, 1, 1], center = false);
+}
+rotate_extrude(angle = 360, start = 180, convexity = 2, $fn = 0, $fa = 12, $fs = 2) {
+	multmatrix([[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]) {
+		square(size = [1, 1], center = false);
+	}
+}
+

@@ -1,0 +1,16 @@
+ECHO: "post", from = [10, 20, 30], to = [14, 22, 36]
+ECHO: "joist 0", from = [100, 0, 0], to = [10, -4, 2]
+ECHO: "joist 1", from = [100, -40, 0], to = [10, -44, 2]
+ECHO: "joist 2", from = [100, -80, 0], to = [10, -84, 2]
+ECHO: m = [[1, 0, 0, 5], [0, 2, 0, 0], [0, 0, 3, 0], [0, 0, 0, 1]]
+ECHO: corners = [[5, 0, 0], [6, 2, 0], [6, 2, 3]]
+ECHO: base = [1, 1, -5]
+ECHO: flat = [1, 1, 0]
+ECHO: bounds = [[0, 0, 0], [1, 1, 1]]
+ECHO: "lifted", from = [0, 0, 50], to = [1, 1, 51]
+WARNING: to_world(): resize() around this point places its children by their geometry, so there is no matrix for it; the answer is undef in file world.scad, line 27
+ECHO: r = undef
+WARNING: world_transform(): rotate_extrude() around this point places its children by their geometry, so there is no matrix for it; the answer is undef in file world.scad, line 28
+ECHO: re = undef
+WARNING: to_world(): p must be [x, y], [x, y, z] or a list of them, found "x"; the answer is undef in file world.scad, line 29
+ECHO: bad = undef, top = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]

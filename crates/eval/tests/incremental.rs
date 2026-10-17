@@ -620,6 +620,31 @@ fn queries_through_the_memo_match_a_fresh_evaluation() {
     assert!(s[1].reused > 0, "{s:?}");
 }
 
+/// `world_transform()` and `to_world()` through the memo: a statement
+/// that read its transform is evaluated anew (its answer depends on where
+/// it runs), to what a fresh evaluation gives, and its neighbours are
+/// still replayed.
+#[test]
+fn world_coordinates_through_the_memo_match_a_fresh_evaluation() {
+    let model = |t: u32, c: u32| {
+        format!(
+            "module stick() {{ echo(to_world([1, 0, 0])); cube(1); }}\n\
+             module place() translate([{t}, 0, 0]) children();\n\
+             place() stick();\n\
+             cube({c});\n\
+             rotate(90) {{ m = world_transform(); echo(m); }}\n"
+        )
+    };
+    let texts = [model(1, 1), model(1, 1), model(2, 1), model(2, 3)];
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let opts = Options {
+        extensions: eval::Extensions::NONE.with(eval::Extension::Query),
+        ..Options::default()
+    };
+    let s = versions_with(&[], &texts, &opts);
+    assert!(s[1].reused > 0, "{s:?}");
+}
+
 /// An oracle for `child_bounds()` that answers from the subtree's node
 /// count, so an answer depends on the child, without rendering.
 #[derive(Debug)]

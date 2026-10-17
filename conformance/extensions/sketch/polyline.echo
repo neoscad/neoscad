@@ -1,0 +1,10 @@
+ECHO: <sketch line "e[0]">, <sketch point "e[2].start">, <sketch point "e[0].start">, 5
+INFO: Sketch 'drawn': 6 free degrees of freedom; these can still move: 'e[1].start' along x, 'e[1].start' along y, 'e[2].start' along x, 'e[2].start' along y, 'e[3].start' along x, 'e[3].start' along y in file polyline.scad, line 22
+ERROR: Sketch 'loose': 2 free degrees of freedom; these can still move: 'e[0].start' along x, 'e[0].start' along y, 'e[1].start' along x, 'e[1].start' along y, 'e[2].start' along x, 'e[2].start' along y, 'e[3].start' along x, 'e[3].start' along y, ... in file polyline.scad, line 28
+WARNING: Sketch 'redundant': length(e[4], 30) is implied by the other constraints: polyline(): horizontal(edge 0) at line 35, polyline(): length(edge 1, 10) at line 35, polyline(): distance(points[2], points[3], 20, along = "y") at line 35, polyline(): horizontal(edge 3) at line 35 in file polyline.scad, line 36
+ERROR: Sketch 'conflict': constraints conflict: length(e[0], 35) at line 40, polyline(): length(edge 0, 40) at line 39 in file polyline.scad, line 40
+ERROR: Sketch 'repeat': polyline(): points[1] and points[2] are both [10, 0], so the line between them (edge 1) would have zero length in file polyline.scad, line 51
+ERROR: Sketch 'zero': length(e[1], 0): a length of 0 makes line 'e[1]' a point: its ends 'q[1]' and 'q[2]' would be the same in file polyline.scad, line 58
+ERROR: Sketch 'short': polyline(): points must be a list of at least 3 [x, y] points for a closed polyline, found [[0, 0], [1, 0]] in file polyline.scad, line 62
+ERROR: Sketch 'mode': polyline(): constrain must be "none", "edges" or "fixed", found "all" in file polyline.scad, line 63
+ERROR: Sketch 'statement': polyline(P): in a sketch body, polyline() makes an entity and must be assigned in file polyline.scad, line 64

@@ -51,6 +51,14 @@ fn every_stable_builtin_has_an_entry() {
 #[test]
 fn extension_entries_name_their_flag() {
     for b in eval::builtins() {
+        // `$neoscad_features` belongs to no one extension (it is bound
+        // when any is on), so its entry says so in its summary instead.
+        if b.name == eval::NEOSCAD_FEATURES {
+            let e = docs::builtin(b.name);
+            assert!(e.len() == 1 && e[0].extension.is_none(), "{e:?}");
+            assert!(e[0].summary.starts_with("NeoSCAD extension"), "{e:?}");
+            continue;
+        }
         let is_ext = b.status == eval::BuiltinStatus::Extension;
         let kind = match b.kind {
             eval::BuiltinKind::Module => docs::Kind::Module,

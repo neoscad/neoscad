@@ -42,7 +42,7 @@ const lists = {
     "floor pow sqrt exp len log ln str chr ord concat lookup search " +
     "version version_num norm cross parent_module dxf_dim dxf_cross " +
     "is_undef is_list is_num is_bool is_string is_function is_object " +
-    "child_anchors child_bounds child_measure child_distance",
+    "child_anchors child_bounds child_measure child_distance world_transform to_world",
   model: "sphere cube cylinder polyhedron square polygon text circle surface roof",
   value: "PI",
 };
@@ -50,7 +50,7 @@ const lists = {
 /// The sketch vocabulary: its entities and constraint statements.
 export const sketchVocabulary = new Set(
   (
-    "point line arc circle coincident on horizontal vertical parallel " +
+    "point line arc circle polyline coincident on horizontal vertical parallel " +
     "perpendicular tangent distance length radius diameter angle equal " +
     "midpoint symmetric fix fillet chamfer"
   ).split(" "),

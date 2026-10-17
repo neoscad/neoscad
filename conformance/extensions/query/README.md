@@ -1,8 +1,8 @@
 # Query goldens
 
 Models for NeoSCAD's queries (`--enable query`: `anchor()`,
-`child_anchors()`, `child_bounds()`, `child_measure()` and
-`child_distance()`;
+`child_anchors()`, `child_bounds()`, `child_measure()`,
+`child_distance()`, `world_transform()` and `to_world()`;
 `docs/language-extensions.md`, sections 5.2 to 5.4), not OpenSCAD's:
 they are not in `conformance/manifest.json` and `conformance run` does
 not read them.
@@ -33,6 +33,10 @@ change meant to alter them, and read the diff.
 - `bounds.scad`: `child_bounds()` and `child_measure()` on 2D and 3D
   children, booleans, `%` and `#` children, mixed dimensions, empty
   children, indices, nested queries, a recursion, and their warnings.
+- `world.scad`: `world_transform()` and `to_world()` through nested
+  transforms, modules that place their children, loops, a centred
+  extrusion and a projection, a query's child put in place again, and
+  their warnings under `resize()` and `rotate_extrude()`.
 - `distance.scad`: `child_distance()` apart, touching, overlapping, one
   inside the other, into a cut, in 2D, between lists of children, and
   its warnings.

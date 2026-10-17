@@ -1,0 +1,350 @@
+[
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "add all 6: `horizontal(e[0]); vertical(e[1]); horizontal(e[2]); vertical(e[3]); length(e[0], 20); length(e[1], 10);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  horizontal(e[0]);\n  vertical(e[1]);\n  horizontal(e[2]);\n  vertical(e[3]);\n  length(e[0], 20);\n  length(e[1], 10);\n"
+        }
+      },
+      {
+        "message": "add `horizontal(e[0]);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  horizontal(e[0]);\n"
+        }
+      },
+      {
+        "message": "add `vertical(e[1]);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  vertical(e[1]);\n"
+        }
+      },
+      {
+        "message": "add `horizontal(e[2]);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  horizontal(e[2]);\n"
+        }
+      },
+      {
+        "message": "add `vertical(e[3]);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  vertical(e[3]);\n"
+        }
+      },
+      {
+        "message": "add `length(e[0], 20);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  length(e[0], 20);\n"
+        }
+      },
+      {
+        "message": "add `length(e[1], 10);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 25
+            },
+            "start": {
+              "column": 1,
+              "line": 25
+            }
+          },
+          "text": "  length(e[1], 10);\n"
+        }
+      }
+    ],
+    "line": 22,
+    "message": "Sketch 'drawn': 6 free degrees of freedom; these can still move: 'e[1].start' along x, 'e[1].start' along y, 'e[2].start' along x, 'e[2].start' along y, 'e[3].start' along x, 'e[3].start' along y",
+    "severity": "info",
+    "span": {
+      "end": {
+        "column": 2,
+        "line": 25
+      },
+      "start": {
+        "column": 20,
+        "line": 22
+      }
+    },
+    "text": "INFO: Sketch 'drawn': 6 free degrees of freedom; these can still move: 'e[1].start' along x, 'e[1].start' along y, 'e[2].start' along x, 'e[2].start' along y, 'e[3].start' along x, 'e[3].start' along y in file polyline.scad, line 22"
+  },
+  {
+    "code": "sketch-underconstrained",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "add `fix(e[0].start);`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 30
+            },
+            "start": {
+              "column": 1,
+              "line": 30
+            }
+          },
+          "text": "  fix(e[0].start);\n"
+        }
+      }
+    ],
+    "line": 28,
+    "message": "Sketch 'loose': 2 free degrees of freedom; these can still move: 'e[0].start' along x, 'e[0].start' along y, 'e[1].start' along x, 'e[1].start' along y, 'e[2].start' along x, 'e[2].start' along y, 'e[3].start' along x, 'e[3].start' along y, ...",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 2,
+        "line": 30
+      },
+      "start": {
+        "column": 21,
+        "line": 28
+      }
+    },
+    "text": "ERROR: Sketch 'loose': 2 free degrees of freedom; these can still move: 'e[0].start' along x, 'e[0].start' along y, 'e[1].start' along x, 'e[1].start' along y, 'e[2].start' along x, 'e[2].start' along y, 'e[3].start' along x, 'e[3].start' along y, ... in file polyline.scad, line 28"
+  },
+  {
+    "code": "sketch-redundant",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "remove `length(e[4], 30)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 37
+            },
+            "start": {
+              "column": 1,
+              "line": 36
+            }
+          },
+          "text": ""
+        }
+      }
+    ],
+    "line": 36,
+    "message": "Sketch 'redundant': length(e[4], 30) is implied by the other constraints: polyline(): horizontal(edge 0) at line 35, polyline(): length(edge 1, 10) at line 35, polyline(): distance(points[2], points[3], 20, along = \"y\") at line 35, polyline(): horizontal(edge 3) at line 35",
+    "severity": "warning",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 36
+      },
+      "start": {
+        "column": 3,
+        "line": 36
+      }
+    },
+    "text": "WARNING: Sketch 'redundant': length(e[4], 30) is implied by the other constraints: polyline(): horizontal(edge 0) at line 35, polyline(): length(edge 1, 10) at line 35, polyline(): distance(points[2], points[3], 20, along = \"y\") at line 35, polyline(): horizontal(edge 3) at line 35 in file polyline.scad, line 36"
+  },
+  {
+    "code": "sketch-conflict",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "remove `length(e[0], 35)`",
+        "replace": {
+          "span": {
+            "end": {
+              "column": 1,
+              "line": 41
+            },
+            "start": {
+              "column": 1,
+              "line": 40
+            }
+          },
+          "text": ""
+        }
+      },
+      {
+        "message": "or change the values so that they agree"
+      }
+    ],
+    "line": 40,
+    "message": "Sketch 'conflict': constraints conflict: length(e[0], 35) at line 40, polyline(): length(edge 0, 40) at line 39",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 40
+      },
+      "start": {
+        "column": 3,
+        "line": 40
+      }
+    },
+    "text": "ERROR: Sketch 'conflict': constraints conflict: length(e[0], 35) at line 40, polyline(): length(edge 0, 40) at line 39 in file polyline.scad, line 40"
+  },
+  {
+    "code": "sketch-zero-length",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "remove the repeated point from the list"
+      }
+    ],
+    "line": 51,
+    "message": "Sketch 'repeat': polyline(): points[1] and points[2] are both [10, 0], so the line between them (edge 1) would have zero length",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 73,
+        "line": 51
+      },
+      "start": {
+        "column": 7,
+        "line": 51
+      }
+    },
+    "text": "ERROR: Sketch 'repeat': polyline(): points[1] and points[2] are both [10, 0], so the line between them (edge 1) would have zero length in file polyline.scad, line 51"
+  },
+  {
+    "code": "sketch-zero-length",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "remove the line (and a repeated point it was drawn between), or join its ends with coincident()"
+      }
+    ],
+    "line": 58,
+    "message": "Sketch 'zero': length(e[1], 0): a length of 0 makes line 'e[1]' a point: its ends 'q[1]' and 'q[2]' would be the same",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 19,
+        "line": 58
+      },
+      "start": {
+        "column": 3,
+        "line": 58
+      }
+    },
+    "text": "ERROR: Sketch 'zero': length(e[1], 0): a length of 0 makes line 'e[1]' a point: its ends 'q[1]' and 'q[2]' would be the same in file polyline.scad, line 58"
+  },
+  {
+    "code": "invalid-argument",
+    "file": "/doc/polyline.scad",
+    "line": 62,
+    "message": "Sketch 'short': polyline(): points must be a list of at least 3 [x, y] points for a closed polyline, found [[0, 0], [1, 0]]",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 56,
+        "line": 62
+      },
+      "start": {
+        "column": 30,
+        "line": 62
+      }
+    },
+    "text": "ERROR: Sketch 'short': polyline(): points must be a list of at least 3 [x, y] points for a closed polyline, found [[0, 0], [1, 0]] in file polyline.scad, line 62"
+  },
+  {
+    "code": "invalid-argument",
+    "file": "/doc/polyline.scad",
+    "line": 63,
+    "message": "Sketch 'mode': polyline(): constrain must be \"none\", \"edges\" or \"fixed\", found \"all\"",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 63
+      },
+      "start": {
+        "column": 29,
+        "line": 63
+      }
+    },
+    "text": "ERROR: Sketch 'mode': polyline(): constrain must be \"none\", \"edges\" or \"fixed\", found \"all\" in file polyline.scad, line 63"
+  },
+  {
+    "code": "sketch-geometry-in-body",
+    "file": "/doc/polyline.scad",
+    "hints": [
+      {
+        "message": "inside a sketch, write `e = polyline(points);`: its lines, `e[i]`, are handles for more constraints"
+      }
+    ],
+    "line": 64,
+    "message": "Sketch 'statement': polyline(P): in a sketch body, polyline() makes an entity and must be assigned",
+    "severity": "error",
+    "span": {
+      "end": {
+        "column": 42,
+        "line": 64
+      },
+      "start": {
+        "column": 30,
+        "line": 64
+      }
+    },
+    "text": "ERROR: Sketch 'statement': polyline(P): in a sketch body, polyline() makes an entity and must be assigned in file polyline.scad, line 64"
+  }
+]

@@ -648,3 +648,140 @@ fn the_queries_limit_counts_renders() {
         "{lines:?}"
     );
 }
+
+/// `world_transform()` and `to_world()`: a library module reports where
+/// its cube is in the model's coordinates, through nested `translate()`,
+/// `mirror()`, `rotate()` and the transforms of a module that places its
+/// `children()`, and the answer agrees with the anchor a query of the
+/// whole subtree carries to the top.
+#[test]
+fn world_coordinates_follow_every_enclosing_transform() {
+    let text = "module stick(tag, s) {\n\
+                  echo(tag, origin = to_world([0, 0, 0]), far = to_world(s));\n\
+                  anchor(tag, s);\n\
+                  cube(s);\n\
+                }\n\
+                module shift() translate([0, 0, 100]) children();\n\
+                module top() { a = child_anchors(0); echo(anchored = a.post[0]); children(0); }\n\
+                top() translate([10, 20, 30]) mirror([1, 0, 0]) rotate([0, 0, 90]) stick(\"post\", [2, 4, 6]);\n\
+                shift() scale(2) stick(\"shifted\", [1, 1, 1]);\n\
+                multmatrix([[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0]]) { m = world_transform(); echo(m = m); }\n\
+                echo(top = world_transform(), list = to_world([[1, 2], [3, 4, 5]]));\n";
+    let out = evaluate(text, &opts(true));
+    assert_eq!(
+        out.lines,
+        [
+            // The query's instance read its transform, so `children(0)`
+            // instantiates the child again, where it prints.
+            "ECHO: anchored = [14, 22, 36] @0",
+            "ECHO: \"post\", origin = [10, 20, 30], far = [14, 22, 36] @0",
+            "ECHO: \"shifted\", origin = [0, 0, 100], far = [2, 2, 102] @0",
+            "ECHO: m = [[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]] @0",
+            "ECHO: top = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], list = [[1, 2, 0], [3, 4, 5]] @0",
+        ]
+    );
+    // The functions change nothing else: the same model with constants.
+    let constant = text
+        .replace("to_world(", "no_query(")
+        .replace("world_transform()", "no_query(0)")
+        + "function no_query(i) = undef;\n";
+    let plain = evaluate(&constant, &opts(true));
+    assert_eq!((out.csg, out.key), (plain.csg, plain.key));
+}
+
+/// A module called at several places, with the call memo on, reports each
+/// place: a call that read its transform is never replayed. A query's
+/// instance of a child that read it is not reused by a `children()` under
+/// another transform either.
+#[test]
+fn world_coordinates_are_never_replayed_from_a_memo() {
+    let text = "module stick(n) { echo(n, to_world([0, 0, 0])); cube(1); }\n\
+                module row() for (i = [0:3]) translate([i * 10, 0, 0]) stick(1);\n\
+                row();\n\
+                translate([0, 5, 0]) row();\n\
+                module lift() { a = child_anchors(0); translate([0, 0, 7]) children(0); }\n\
+                lift() stick(2);\n";
+    let on = evaluate(text, &opts(true));
+    assert_eq!(on, evaluate(text, &opts(false)));
+    let echoes: Vec<&str> = on.lines.iter().map(String::as_str).collect();
+    assert_eq!(
+        echoes,
+        [
+            "ECHO: 1, [0, 0, 0] @0",
+            "ECHO: 1, [10, 0, 0] @0",
+            "ECHO: 1, [20, 0, 0] @0",
+            "ECHO: 1, [30, 0, 0] @0",
+            "ECHO: 1, [0, 5, 0] @0",
+            "ECHO: 1, [10, 5, 0] @0",
+            "ECHO: 1, [20, 5, 0] @0",
+            "ECHO: 1, [30, 5, 0] @0",
+            "ECHO: 2, [0, 0, 7] @0",
+        ]
+    );
+}
+
+/// Under `resize()` (which scales by the child's rendered size) there is
+/// no matrix, and a point that is not one is refused, each with a warning;
+/// flag off, the names are OpenSCAD's unknown functions.
+#[test]
+fn world_coordinates_warn_where_there_is_no_answer() {
+    let text = "resize([5, 5, 5]) translate([1, 0, 0]) { echo(to_world([0, 0])); cube(1); }\n\
+                echo(to_world(\"x\"), world_transform());\n";
+    let on = evaluate(text, &opts(true));
+    assert_eq!(
+        on.lines,
+        [
+            "WARNING: to_world(): resize() around this point places its children by their geometry, so there is no matrix for it; the answer is undef @1",
+            "ECHO: undef @0",
+            "WARNING: to_world(): p must be [x, y], [x, y, z] or a list of them, found \"x\"; the answer is undef @2",
+            "ECHO: undef, [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]] @0",
+        ]
+    );
+    let off = evaluate(text, &Options::default());
+    assert!(
+        off.lines
+            .iter()
+            .any(|l| l.starts_with("WARNING: Ignoring unknown function 'to_world'")),
+        "{:?}",
+        off.lines
+    );
+}
+
+/// `$neoscad_features` lists the NeoSCAD extensions on, in `--enable`
+/// order, and with none on is unbound as in OpenSCAD, so the library
+/// pattern below takes the plain branch there without a warning.
+#[test]
+fn neoscad_features_names_the_extensions_on() {
+    let text = "function neoscad_feature(name) =\n\
+                  !is_undef($neoscad_features) && [for (f = $neoscad_features) if (f == name) f] != [];\n\
+                echo(sketch = neoscad_feature(\"sketch\"), fillet = neoscad_feature(\"fillet\"));\n\
+                module m() echo($neoscad_features);\n\
+                m();\n";
+    let off = evaluate(text, &Options::default());
+    assert_eq!(
+        off.lines,
+        [
+            "ECHO: sketch = false, fillet = false @0",
+            "WARNING: Ignoring unknown variable \"$neoscad_features\" @4",
+            "ECHO: undef @0",
+        ]
+    );
+    let on = evaluate(text, &opts(true));
+    assert_eq!(
+        on.lines,
+        [
+            "ECHO: sketch = true, fillet = false @0",
+            "ECHO: [\"sketch\", \"query\"] @0",
+        ]
+    );
+    let all = Options {
+        extensions: eval::Extension::ALL
+            .into_iter()
+            .fold(Extensions::NONE, |x, e| x.with(e)),
+        ..Options::default()
+    };
+    assert_eq!(
+        evaluate(text, &all).lines[1],
+        "ECHO: [\"part\", \"sketch\", \"query\", \"exact\", \"fillet\"] @0"
+    );
+}

@@ -167,6 +167,9 @@ pub enum DiagCode {
     /// A sketch point written without a guess, which the solver placed
     /// (info).
     SketchNoGuess,
+    /// A sketch line of no length: a polyline with a repeated point, or
+    /// `length(l, 0)`.
+    SketchZeroLength,
     /// NeoSCAD's queries (`--enable query`): a query outside any user
     /// module, which has no children to ask about.
     QueryOutsideModule,
@@ -179,6 +182,10 @@ pub enum DiagCode {
     QueryEmpty,
     /// A geometry query in a host that cannot render, so has no answer.
     QueryUnavailable,
+    /// `world_transform()` or `to_world()` under a node that places its
+    /// children by their geometry (`resize()`, `rotate_extrude()`), so has
+    /// no matrix.
+    QueryNoTransform,
     /// NeoSCAD's `fillet_edges()`/`chamfer_edges()` (`--enable fillet`):
     /// an edge selector that does not parse, or is not a selector.
     FilletSelector,
@@ -269,11 +276,13 @@ impl DiagCode {
             DiagCode::SketchGeometryInBody => "sketch-geometry-in-body",
             DiagCode::SketchSelfIntersection => "sketch-self-intersection",
             DiagCode::SketchNoGuess => "sketch-no-guess",
+            DiagCode::SketchZeroLength => "sketch-zero-length",
             DiagCode::QueryOutsideModule => "query-outside-module",
             DiagCode::QueryIndex => "query-index",
             DiagCode::QueryDuplicateAnchor => "query-duplicate-anchor",
             DiagCode::QueryEmpty => "query-empty",
             DiagCode::QueryUnavailable => "query-unavailable",
+            DiagCode::QueryNoTransform => "query-no-transform",
             DiagCode::FilletSelector => "fillet-selector",
             DiagCode::FilletCount => "fillet-count",
             DiagCode::FilletNoEdges => "fillet-no-edges",

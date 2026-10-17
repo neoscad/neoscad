@@ -104,15 +104,16 @@ pub(crate) enum Vocab {
 }
 
 /// The vocabulary's functions, by name.
-const FUNCTIONS: [(&str, Builtin); 4] = [
+const FUNCTIONS: [(&str, Builtin); 5] = [
     ("point", Builtin::SketchPoint),
     ("line", Builtin::SketchLine),
     ("arc", Builtin::SketchArc),
     ("circle", Builtin::SketchCircle),
+    ("polyline", Builtin::SketchPolyline),
 ];
 
 /// The vocabulary's statements, by name, with their parameters.
-const STATEMENTS: [(&str, Vocab, &[&str]); 22] = [
+const STATEMENTS: [(&str, Vocab, &[&str]); 23] = [
     ("coincident", Vocab::Coincident, &["a", "b"]),
     ("on", Vocab::On, &["p", "c"]),
     ("horizontal", Vocab::Horizontal, &["a", "b"]),
@@ -135,6 +136,7 @@ const STATEMENTS: [(&str, Vocab, &[&str]); 22] = [
     ("line", Vocab::Geometry, &[]),
     ("arc", Vocab::Geometry, &[]),
     ("circle", Vocab::Geometry, &[]),
+    ("polyline", Vocab::Geometry, &[]),
 ];
 
 /// Every name the vocabulary binds inside a sketch body, functions first,
@@ -741,6 +743,11 @@ impl<'a> Evaluator<'a> {
             }
         };
         for a in &scope.assignments {
+            // A list (`polyline()`'s lines) is named element by element
+            // below, though its call made them all.
+            if let Some(Value::Vector(_)) = ctx.get_local(unit.sym(a.name), &self.regions) {
+                continue;
+            }
             let span = unit.ast.expr(a.expr).span;
             if let Some((e, _)) = made
                 .iter()
@@ -756,6 +763,7 @@ impl<'a> Evaluator<'a> {
             match ctx.get_local(unit.sym(a.name), &self.regions) {
                 Some(Value::Entity(e)) => name(&e, var.to_string(), &mut named),
                 Some(Value::Vector(v)) => {
+                    let first = named.len();
                     for (i, x) in v.as_slice().iter().enumerate() {
                         match x {
                             Value::Entity(e) => name(e, format!("{var}[{i}]"), &mut named),
@@ -767,6 +775,18 @@ impl<'a> Evaluator<'a> {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                    // Lines that share their ends (`polyline()`'s, or a
+                    // list of `line(q[i], q[i + 1])`) name each shared
+                    // point as the start of the line it begins, `e[i]`'s
+                    // point `i`, before the end of the one before.
+                    for k in first..named.len() {
+                        let e = b.ents[named[k]].clone();
+                        if let (Some(p), Some(l)) = (&e.parts[0], e.label())
+                            && e.kind == EntityKind::Line
+                        {
+                            name(p, format!("{l}.start"), &mut named);
                         }
                     }
                 }
@@ -801,6 +821,10 @@ impl<'a> Evaluator<'a> {
         // does cannot be replayed from a memo.
         self.untracked_sketch();
         let (name, params): (&str, &[&str]) = match f {
+            Builtin::SketchPolyline => (
+                "polyline",
+                &["points", "closed", "constrain", "construction"],
+            ),
             Builtin::SketchPoint => ("point", &["at"]),
             Builtin::SketchLine => ("line", &["p", "q", "construction"]),
             Builtin::SketchArc => ("arc", &["center", "start", "end", "cw", "construction"]),
@@ -820,7 +844,12 @@ impl<'a> Evaluator<'a> {
             return Ok(Value::Undef);
         };
         let mut notes = Vec::new();
-        let r = sketch_entity_in(&mut b, f, name, &vals, loc, &mut notes, self);
+        let r = if f == Builtin::SketchPolyline {
+            polyline_in(&mut b, &vals, loc, &mut notes, self)
+                .map(|lines| Value::vector(lines.into_iter().map(Value::Entity).collect()))
+        } else {
+            sketch_entity_in(&mut b, f, name, &vals, loc, &mut notes, self).map(Value::Entity)
+        };
         if !notes.is_empty() {
             b.failed = true;
         }
@@ -828,7 +857,7 @@ impl<'a> Evaluator<'a> {
         let prefix = b.prefix();
         self.sketch = Some(b);
         self.print_notes(&prefix, notes);
-        Ok(r.map_or(Value::Undef, Value::Entity))
+        Ok(r.unwrap_or(Value::Undef))
     }
 
     /// A constraint, fillet or chamfer statement in a sketch body.
@@ -897,9 +926,11 @@ impl<'a> Evaluator<'a> {
                 text: format!(
                     "{text}: in a sketch body, {name}() makes an entity and must be assigned"
                 ),
-                hints: say(format!(
-                    "inside a sketch, write `c = {name}(...);` with entities as its arguments"
-                )),
+                hints: say(if name == "polyline" {
+                    "inside a sketch, write `e = polyline(points);`: its lines, `e[i]`, are handles for more constraints".to_string()
+                } else {
+                    format!("inside a sketch, write `c = {name}(...);` with entities as its arguments")
+                }),
             });
         } else {
             b.stmts.push(Stmt {
@@ -1519,6 +1550,200 @@ fn sketch_entity_in(
     }
 }
 
+/// How much of its shape `polyline()` constrains.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Constrain {
+    /// Nothing: points and lines only, as if written one by one.
+    None,
+    /// Every edge's run and rise as drawn, but the closing edge of a
+    /// closed one (which the others imply): the shape is fixed, free to
+    /// move by two degrees of freedom.
+    Edges,
+    /// The edges, and the first point fixed where it is drawn: nothing is
+    /// left free.
+    Fixed,
+}
+
+/// `polyline(points, closed = true, constrain = "none", construction =
+/// false)` on the builder: a point per element of `points`, drawn there, and
+/// a line from each to the next (and from the last back to the first when
+/// `closed`), as the list of lines; line `i` runs from `.start`, point `i`,
+/// to `.end`, point `i + 1`. With `constrain`, each edge but a closed
+/// polyline's last is dimensioned as drawn: `horizontal()` or `vertical()`
+/// and `length()` when it is axis-aligned, `distance(.., along = "x")` and
+/// `along = "y"` (signed) otherwise; `"fixed"` also fixes the first point.
+fn polyline_in(
+    b: &mut Builder,
+    vals: &[Value],
+    loc: Loc,
+    notes: &mut Vec<Note>,
+    ev: &mut Evaluator<'_>,
+) -> Option<Vec<Rc<Entity>>> {
+    let what = "polyline()";
+    let error = |code: DiagCode, text: String, hint: Option<&str>| Note {
+        severity: Severity::Error,
+        code,
+        loc,
+        text: format!("{what}: {text}"),
+        hints: hint.map(say).unwrap_or_default(),
+    };
+    let closed = vals[1].is_undef() || vals[1].to_bool();
+    let constrain = match &vals[2] {
+        Value::Undef => Constrain::None,
+        Value::Str(s) if s.as_bytes() == b"none" => Constrain::None,
+        Value::Str(s) if s.as_bytes() == b"edges" => Constrain::Edges,
+        Value::Str(s) if s.as_bytes() == b"fixed" => Constrain::Fixed,
+        other => {
+            let mut found = Vec::new();
+            ev.write_echo_nothrow(other, &mut found);
+            notes.push(error(
+                DiagCode::InvalidArgument,
+                format!(
+                    "constrain must be \"none\", \"edges\" or \"fixed\", found {}",
+                    String::from_utf8_lossy(&found)
+                ),
+                None,
+            ));
+            return None;
+        }
+    };
+    let pts: Option<Vec<[f64; 2]>> = vals[0]
+        .as_vector()
+        .and_then(|v| v.as_slice().iter().map(|p| p.as_vec2(true)).collect());
+    let least = if closed { 3 } else { 2 };
+    let pts = match pts {
+        Some(p) if p.len() >= least => p,
+        _ => {
+            let mut found = Vec::new();
+            ev.write_echo_nothrow(&vals[0], &mut found);
+            notes.push(error(
+                DiagCode::InvalidArgument,
+                format!(
+                    "points must be a list of at least {least} [x, y] points{}, found {}",
+                    if closed { " for a closed polyline" } else { "" },
+                    String::from_utf8_lossy(&found)
+                ),
+                None,
+            ));
+            return None;
+        }
+    };
+    let n = pts.len();
+    let edges = if closed { n } else { n - 1 };
+    // A repeated point makes an edge of no length, which the solver would
+    // only report as constraints that disagree about which way a corner
+    // turns: say what it is.
+    let zero: Vec<usize> = (0..edges).filter(|&i| pts[i] == pts[(i + 1) % n]).collect();
+    if !zero.is_empty() {
+        for &i in zero.iter().take(4) {
+            let j = (i + 1) % n;
+            notes.push(error(
+                DiagCode::SketchZeroLength,
+                format!(
+                    "points[{i}] and points[{j}] are both {}, so the line between them (edge {i}) would have zero length",
+                    coords(pts[i])
+                ),
+                Some("remove the repeated point from the list"),
+            ));
+        }
+        return None;
+    }
+    let construction = vals[3].to_bool();
+    let mut points = Vec::with_capacity(n);
+    for &xy in &pts {
+        match b.model.point(Some(xy)) {
+            Ok(id) => points.push(b.push(id, EntityKind::Point, [None, None, None], loc, None)),
+            Err(e) => {
+                notes.push(model_note(&e, what, loc));
+                return None;
+            }
+        }
+    }
+    let mut lines = Vec::with_capacity(edges);
+    for i in 0..edges {
+        let (p, q) = (&points[i], &points[(i + 1) % n]);
+        let id = match b.model.line(p.id, q.id) {
+            Ok(id) => id,
+            Err(e) => {
+                notes.push(model_note(&e, what, loc));
+                return None;
+            }
+        };
+        let _ = b.model.set_construction(id, construction);
+        let parts = [Some(p.clone()), Some(q.clone()), None];
+        lines.push(b.push(id, EntityKind::Line, parts, loc, None));
+    }
+    let mut add = |b: &mut Builder, text: String, c: Constraint| {
+        b.stmts.push(Stmt {
+            text: format!("{what}: {text}"),
+            loc,
+            written: false,
+            args: Vec::new(),
+        });
+        let stmt = b.stmts.len() - 1;
+        if let Err(e) = b.add(c, stmt) {
+            notes.push(model_note(&e, what, loc));
+        }
+    };
+    if constrain != Constrain::None {
+        // A closed polyline's last edge closes the loop: the others give
+        // its run and rise.
+        let dimensioned = if closed { edges - 1 } else { edges };
+        for (i, l) in lines.iter().enumerate().take(dimensioned) {
+            let j = (i + 1) % n;
+            let (dx, dy) = (pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]);
+            if dy == 0.0 || dx == 0.0 {
+                let (h, len) = if dy == 0.0 {
+                    (true, dx.abs())
+                } else {
+                    (false, dy.abs())
+                };
+                let (name, c) = if h {
+                    ("horizontal", Constraint::Horizontal(Pair::Line(l.id)))
+                } else {
+                    ("vertical", Constraint::Vertical(Pair::Line(l.id)))
+                };
+                add(b, format!("{name}(edge {i})"), c);
+                add(
+                    b,
+                    format!("length(edge {i}, {})", fmt_number(len)),
+                    Constraint::Length {
+                        line: l.id,
+                        value: len,
+                    },
+                );
+            } else {
+                for (d, along, axis) in [(dx, Along::X, "x"), (dy, Along::Y, "y")] {
+                    add(
+                        b,
+                        format!(
+                            "distance(points[{i}], points[{j}], {}, along = \"{axis}\")",
+                            fmt_number(d)
+                        ),
+                        Constraint::Distance {
+                            a: points[i].id,
+                            b: points[j].id,
+                            value: d,
+                            along,
+                        },
+                    );
+                }
+            }
+        }
+        if constrain == Constrain::Fixed {
+            add(
+                b,
+                "fix(points[0])".to_string(),
+                Constraint::Fix {
+                    entity: points[0].id,
+                    at: None,
+                },
+            );
+        }
+    }
+    Some(lines)
+}
+
 /// [`Evaluator::sketch_statement`] on the builder taken out of the
 /// evaluator: the statement's constraints.
 #[allow(clippy::too_many_arguments)]
@@ -1672,6 +1897,34 @@ fn statement_in(
         Vocab::Length => {
             let l = ent!(0);
             let d = num!(1);
+            // A line of no length is two names for one point; the solver
+            // would only report it as corners that turn the wrong way and
+            // freedoms left over.
+            if d == 0.0 && l.kind == EntityKind::Line {
+                let ends = match (&l.parts[0], &l.parts[1]) {
+                    (Some(p), Some(q)) => {
+                        format!(
+                            ": its ends {} and {} would be the same",
+                            b.describe(p.id),
+                            b.describe(q.id)
+                        )
+                    }
+                    _ => String::new(),
+                };
+                notes.push(Note {
+                    severity: Severity::Error,
+                    code: DiagCode::SketchZeroLength,
+                    loc,
+                    text: format!(
+                        "{what}: a length of 0 makes line {} a point{ends}",
+                        b.describe(l.id)
+                    ),
+                    hints: say(
+                        "remove the line (and a repeated point it was drawn between), or join its ends with coincident()",
+                    ),
+                });
+                return;
+            }
             add(
                 b,
                 Constraint::Length {

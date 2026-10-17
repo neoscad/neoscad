@@ -1715,6 +1715,15 @@ lead them, come roughly in order of user impact.
   digests; the cross-platform digest is still only checked here
   (`sketch-solver-determinism` in `crates/wasm-check`).
 
+- `polyline()` dimensions an axis-aligned edge with `horizontal()` or
+  `vertical()` and `length()`, which hold its length but not its sign;
+  the solve starts from the drawing, which satisfies them, so it stays,
+  but a later edit that moved points far could flip such an edge where
+  signed `distance(..., along)` would not. Other generated modes (equal
+  edges, an `angles` mode dimensioning corners rather than runs and
+  rises) are not built; the per-edge `Stmt` texts name the edge and
+  points by index, since labels are not known when the call runs.
+
 ## Geometry queries
 - `resize()` and `rotate_extrude()` hide their children's anchors
   (`docs/language-extensions.md`, section 11.3). `rotate_extrude` could
@@ -1799,6 +1808,19 @@ lead them, come roughly in order of user impact.
   = 5, $fn = 24); cube(4); } cube(1); translate([10, 0, 0]) cube(1);`.
   Each statement alone matches; in `bounds.csg` the counts first differ
   when the last two cubes join the union of the others.
+- `world_transform()` and `to_world()` give `undef` under `resize()`
+  and `rotate_extrude()`, as anchors are hidden there. `resize()` could
+  answer with the child's bounds from the oracle (a render per call,
+  counted against `queries`), and `rotate_extrude()` at its start angle;
+  the same work would serve both. There is no direction form
+  (`to_world(dir, point = false)`, the linear part alone, as anchors'
+  `dir` move); `world_transform()` times `[x, y, z, 0]` gives it.
+- A statement or module call that reads `world_transform()` or
+  `to_world()` is never replayed by the memos (it is untracked, as
+  `rands()` is). A key with the transform's digest would let repeated
+  calls at one place be replayed; a model that reports every member of a
+  frame from inside a loop of placed calls is exactly the case where no
+  two calls share a place, so this was not worth its cost yet.
 
 ## Determinism
 - Console output of two reference models varies between runs of one

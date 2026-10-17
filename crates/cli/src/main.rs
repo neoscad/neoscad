@@ -172,7 +172,8 @@ struct Cli {
     /// exports), `sketch` its constrained 2D
     /// sketches (`sketch() { ... }`), `query` its geometry queries
     /// (`anchor()`, `child_anchors()`, `child_bounds()`,
-    /// `child_measure()`, `child_distance()`), `exact` STEP export
+    /// `child_measure()`, `child_distance()`, `world_transform()`,
+    /// `to_world()`), `exact` STEP export
     /// (`-o x.step`) with exact surfaces where `$fn` is not set, `fillet`
     /// its `fillet_edges()` and `chamfer_edges()` (rounded and chamfered
     /// edges: straight ones, and circles and arcs about an axis). `all`

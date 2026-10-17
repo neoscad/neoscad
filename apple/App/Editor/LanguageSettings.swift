@@ -32,7 +32,8 @@ enum LanguageSettings {
     }
 
     /// Geometry queries: `anchor()`, `child_anchors()`, `child_bounds()`,
-    /// `child_measure()` and `child_distance()` inside modules.
+    /// `child_measure()` and `child_distance()` inside modules, and
+    /// `world_transform()` and `to_world()` anywhere.
     static var queries: Bool {
         get { UserDefaults.standard.bool(forKey: queriesKey) }
         set {

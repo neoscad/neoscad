@@ -59,6 +59,10 @@ const SNIPPETS: &[(&str, &str)] = &[
     ("line", "line(${1:p}, ${2:q})"),
     ("arc", "arc(${1:center}, ${2:start}, ${3:end})"),
     ("circle", "circle(${1:center}, r = ${2:5})"),
+    (
+        "polyline",
+        "polyline(${1:points}, constrain = \"${2:fixed}\")",
+    ),
     ("coincident", "coincident(${1:a}, ${2:b});"),
     ("on", "on(${1:point}, ${2:curve});"),
     ("horizontal", "horizontal(${1:line});"),

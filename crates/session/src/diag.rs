@@ -270,7 +270,14 @@ fn hint(d: &Logged, names: &Names) -> Option<String> {
         DiagCode::UnknownFunction
             if matches!(
                 quoted(&d.message),
-                Some("child_anchors" | "child_bounds" | "child_measure" | "child_distance")
+                Some(
+                    "child_anchors"
+                        | "child_bounds"
+                        | "child_measure"
+                        | "child_distance"
+                        | "world_transform"
+                        | "to_world"
+                )
             ) =>
         {
             let name = quoted(&d.message).unwrap_or_default();

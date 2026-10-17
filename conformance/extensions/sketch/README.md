@@ -31,7 +31,12 @@ change meant to alter them, and read the diff.
   both circles, inside one and outside the other, and outside both, the
   widest fillet a lens takes, and the same errors.
 
-For `diagnostics.scad` and `hints.scad`, `NAME.json` holds the
+- `polyline.scad`: `polyline()` with each `constrain` mode, strict;
+  constraints attached to its handles, a redundant and a conflicting
+  one; an open polyline; a repeated point and `length(l, 0)` (zero-length
+  lines); and its argument errors.
+
+For `diagnostics.scad`, `hints.scad` and `polyline.scad`, `NAME.json` holds the
 diagnostics as JSON (`docs/cli-json.md`), hints and their edits
 included. The same test applies every edit to the source and checks that
 the problem it was about is gone.

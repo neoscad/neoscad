@@ -1700,6 +1700,66 @@ queries"), done after stage 7:
   no change; a file that fails to read or parse (another process
   mid-write, a damaged file) is ignored rather than read as everything
   off. Test: `LanguageSettingsSavedElsewhereReachTheWatchingWindow`.
+- **`world_transform()` and `to_world(p)`** (`--enable query`;
+  `Evaluator::world_transform`, `crates/eval/src/query.rs`). Asked for
+  by a model whose library modules had to report every framing
+  member's position for cut lists and drawings, and so threaded a
+  hand-made `$M` matrix through wrappers instead of using `translate()`
+  and `mirror()`. Functions rather than a `$transform` variable: BOSL2
+  already binds `$transform` (`crates/eval/src/callmemo.rs` keys it by
+  shape), a `$` variable a program can assign would need its own
+  shadowing rules, and flag off a function is OpenSCAD's unknown
+  function, as the other queries are. The matrix is the product of the
+  evaluator's stack of nodes being filled (`heap_nodes`), each by
+  `own_matrix`, the rule `child_anchors()` carries anchors by, so the
+  two always agree; it costs nothing until called, and a product per
+  enclosing transform when it is. `resize()` and `rotate_extrude()`
+  answer `undef` with `query-no-transform`. Reading it calls
+  `untracked()`, so neither memo replays the statement or call and a
+  query's instance that read it is not reused by `children()` (which
+  may be under another transform). Tests: `world_coordinates_*` in
+  `crates/eval/tests/query.rs` and `incremental.rs`, and the golden
+  `conformance/extensions/query/world.scad`; user docs in
+  `docs/geometry-queries.md`.
+- **`polyline(points, closed, constrain, construction)`** (`--enable
+  sketch`; `polyline_in`, `crates/eval/src/sketch.rs`). A sketch entity
+  function, like `circle(c, r)` adding its radius, rather than a recipe:
+  the recipe users wrote (a point list, a line per edge, `fix` and a
+  pair of constraints per edge but the closing one) needed a list
+  comprehension, a `let` and three branches, and its failure modes were
+  the solver's indirect messages. It returns the lines, so constraints
+  attach to them (`e[i]`, `e[i].start`), and each generated constraint
+  is its own unwritten statement (`polyline(): length(edge 0, 40)`), so
+  redundancy and conflict analysis names it like a written one, with no
+  removal edit. `constrain = "none"` is the default, as no other entity
+  adds constraints unless asked; `"edges"` leaves the 2 translations
+  free and `"fixed"` none. Labels: a list of lines names each shared
+  point as the start of the line it begins (`sketch_label`). A repeated
+  point and `length(l, 0)` are a new error, `sketch-zero-length`,
+  naming the points; before, a zero-length edge surfaced as "implied by
+  the other constraints", a flipped corner and free degrees of
+  freedom. Tests: the golden `conformance/extensions/sketch/polyline.scad`
+  (with JSON, its hint edits applied by `every_hint_edit_fixes_its_problem`)
+  and `polyline_is_the_hand_written_profile`
+  (`crates/session/tests/sketch.rs`); user docs in `docs/sketch.md`.
+- **`$neoscad_features`** (`Evaluator::run`, `eval::NEOSCAD_FEATURES`).
+  Asked for by a library (FramingSCAD) that uses sketches under
+  NeoSCAD and `polygon()` in OpenSCAD and made its users set a flag by
+  hand: `version()` is the nightly's, and the sketch vocabulary is
+  invisible outside sketch bodies, so nothing told the two apart. A `$`
+  variable rather than a function such as `feature("sketch")`, because
+  an unknown variable read by `is_undef()` is silent in OpenSCAD while
+  an unknown function call warns. It is a list of `--enable` names in
+  `Extension::ALL` order, bound in the builtin context only when at
+  least one extension is on: with none, a file runs exactly as in
+  OpenSCAD (section 1), the price being that NeoSCAD with no extension
+  is not detectable, which nothing needs. It is a `$` variable like any
+  other, so the call memo keys its reads and the statement memo's
+  global key already holds the options. Test:
+  `neoscad_features_names_the_extensions_on`
+  (`crates/eval/tests/query.rs`); user docs in `docs/sketch.md` and
+  `docs/geometry-queries.md` ("OpenSCAD superset") and its
+  `builtins.toml` entry.
 
 ## 12. Alternatives considered
 

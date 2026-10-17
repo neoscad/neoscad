@@ -25,7 +25,8 @@ pub struct Settings {
     /// Constrained sketches: `sketch() { ... }`.
     pub sketch: bool,
     /// Geometry queries: `anchor()`, `child_anchors()`, `child_bounds()`,
-    /// `child_measure()` and `child_distance()`.
+    /// `child_measure()`, `child_distance()`, `world_transform()` and
+    /// `to_world()`.
     pub query: bool,
     /// STEP export with exact surfaces (File > Export > STEP).
     pub exact: bool,

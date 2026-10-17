@@ -24,7 +24,8 @@ public sealed record LanguageSettings
 
     /// <summary>
     /// Geometry queries: <c>anchor()</c>, <c>child_anchors()</c>,
-    /// <c>child_bounds()</c>, <c>child_measure()</c> and <c>child_distance()</c>.
+    /// <c>child_bounds()</c>, <c>child_measure()</c>, <c>child_distance()</c>,
+    /// <c>world_transform()</c> and <c>to_world()</c>.
     /// </summary>
     [JsonPropertyName("query")] public bool Query { get; init; }
 

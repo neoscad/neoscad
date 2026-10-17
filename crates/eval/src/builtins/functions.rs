@@ -75,6 +75,9 @@ pub(crate) enum Builtin {
     SketchLine,
     SketchArc,
     SketchCircle,
+    /// `polyline(points, ...)`: points and lines at once, with the
+    /// constraints that fix their shape when asked.
+    SketchPolyline,
     /// NeoSCAD's queries (`--enable query`): in the table only with the
     /// extension on, so off they are OpenSCAD's unknown functions.
     /// `child_anchors()` reads anchors; `child_bounds()` and
@@ -84,6 +87,10 @@ pub(crate) enum Builtin {
     ChildMeasure,
     /// `child_distance(i, j)`: renders both children (`crate::oracle`).
     ChildDistance,
+    /// `world_transform()` and `to_world(p)`: the transforms around the
+    /// statement running now (`crate::query`). They render nothing.
+    WorldTransform,
+    ToWorld,
 }
 
 impl Builtin {
@@ -192,6 +199,8 @@ pub(crate) fn table(
         ("child_bounds", Builtin::ChildBounds),
         ("child_measure", Builtin::ChildMeasure),
         ("child_distance", Builtin::ChildDistance),
+        ("world_transform", Builtin::WorldTransform),
+        ("to_world", Builtin::ToWorld),
     ]
     .into_iter()
     .filter(|_| extensions.has(crate::Extension::Query));
@@ -600,9 +609,11 @@ impl<'a> Evaluator<'a> {
             TextMetrics => self.metrics(std::mem::take(a), loc, false),
             FontMetrics => self.metrics(std::mem::take(a), loc, true),
             Import => self.import_function(std::mem::take(a), loc),
-            SketchPoint | SketchLine | SketchArc | SketchCircle => {
+            SketchPoint | SketchLine | SketchArc | SketchCircle | SketchPolyline => {
                 return self.sketch_entity(b, loc, a);
             }
+            WorldTransform => self.world_transform(a, loc),
+            ToWorld => self.world_point(a, loc),
             // Evaluated from their unevaluated arguments in `call_builtin`
             // (the queries there because they need the caller's context).
             IsUndef | Object | ChildAnchors | ChildBounds | ChildMeasure | ChildDistance => {

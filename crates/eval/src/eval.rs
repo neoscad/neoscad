@@ -19,7 +19,7 @@ use crate::resolve::{BUILTIN_REGION, Cand, NO_SLOT, Ref, Region};
 use crate::rng::Mt19937;
 use crate::sym::{FxBuild, Sym, Syms};
 use crate::value::{FunctionValue, Str, Value};
-use crate::{Evaluation, Library, Options};
+use crate::{Evaluation, Library, NEOSCAD_FEATURES, Options};
 
 /// Per-scope lookup tables, built once per evaluation.
 pub(crate) struct ScopeInfo<'a> {
@@ -1578,6 +1578,20 @@ impl<'a> Evaluator<'a> {
         self.set_var(&b, vpt, vec3(cam.vpt));
         self.set_var(&b, vpd, Value::Number(cam.vpd));
         self.set_var(&b, vpf, Value::Number(cam.vpf));
+        // NeoSCAD's own: the extensions on, by `--enable` name, so a
+        // library can use them and fall back to plain OpenSCAD where they
+        // are off. Bound only when one is on: with none, the program runs
+        // exactly as in OpenSCAD, where the name is unknown (undef, which
+        // `is_undef($neoscad_features)` tests without a warning).
+        let on: Vec<Value> = crate::Extension::ALL
+            .into_iter()
+            .filter(|e| self.opts.extensions.has(*e))
+            .map(|e| Value::Str(Str::new(e.name().as_bytes())))
+            .collect();
+        if !on.is_empty() {
+            let s = self.syms.intern(NEOSCAD_FEATURES);
+            self.set_var(&b, s, Value::vector(on));
+        }
 
         let mut root = Node {
             kind: NodeKind::Root,

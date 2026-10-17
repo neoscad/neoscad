@@ -65,6 +65,31 @@ the vocabulary does not exist and those names keep their meaning. A
 program's own `module sketch` wins over the builtin, and its children
 get no vocabulary.
 
+A library that should work in both programs can test for the extension
+with `$neoscad_features`, the list of NeoSCAD extensions on (unbound,
+as in OpenSCAD, when none is), and keep a plain `polygon()` for
+OpenSCAD:
+
+```openscad
+function neoscad_feature(name) =
+  !is_undef($neoscad_features) && [for (f = $neoscad_features) if (f == name) f] != [];
+USE_SKETCH = neoscad_feature("sketch");
+module profile(P) {
+  if (USE_SKETCH)
+    sketch(name = "profile", strict = true) {
+      e = polyline(P, constrain = "fixed");
+      fillet(e[2].start, 3);
+    }
+  else
+    polygon(P);
+}
+linear_extrude(5) profile([[0, 0], [40, 0], [40, 10], [25, 30], [0, 30]]);
+```
+
+`is_undef()` reads the unknown name without a warning in OpenSCAD, and
+`&&` stops before the list is read, so the stock nightly renders the
+`polygon()` branch with no message (`neoscad docs '$neoscad_features'`).
+
 The output is plain OpenSCAD: a solved sketch exports to `.csg` as the
 `polygon(points = ..., paths = ...)` it is, a file stock OpenSCAD reads
 without the extension.
@@ -128,6 +153,7 @@ sketch(name = "two") {
 | `line(p, q, construction = false)` | `p`, `q`: point handles, or `[x, y]` for a new point there | `.start`, `.end` |
 | `arc(center, start, end, cw = false, construction = false)` | points or `[x, y]`; counter-clockwise from `start` to `end` unless `cw` | `.center`, `.start`, `.end` |
 | `circle(center, r, d, construction = false)` | `center`: a point or `[x, y]`; `r` or `d`, when given, is a radius constraint | `.center` |
+| `polyline(points, closed = true, constrain = "none", construction = false)` | `points`: a list of `[x, y]`; makes a point at each and the lines between them, with constraints when asked | a list of lines `e[i]`, from `e[i].start` (point `i`) to `e[i].end` |
 
 Two lines that share a point handle are joined there. A handle prints as
 `<sketch line "top">`, and two handles are equal when they name the same
@@ -166,6 +192,42 @@ sketch() {
 ```openscad
 sketch() { c = circle([0, 0], r = 5); fix(c.center); }
 ```
+
+### polyline
+
+A profile drawn as a list of points: a point at each, a line from each
+to the next, and with `closed` (the default) a line from the last back
+to the first. It gives the list of lines; line `i` runs from point `i`
+(`e[i].start`) to point `i + 1` (`e[i].end`), and consecutive lines
+share their point, so they are joined.
+
+`constrain` says how much of the drawn shape it holds:
+
+| `constrain` | Constraints added | Left free |
+|---|---|---|
+| `"none"` (default) | none: as if each point and line were written by hand | everything |
+| `"edges"` | for each edge but a closed polyline's last (which the others imply): `horizontal()` or `vertical()` and `length()` when it is axis-aligned, otherwise `distance(..., along = "x")` and `distance(..., along = "y")` with the drawn, signed run and rise | the position: 2 degrees of freedom |
+| `"fixed"` | the edges, and `fix()` of the first point where it is drawn | nothing |
+
+So `constrain = "fixed"` with `strict = true` is a fully determined
+profile that solves to exactly the points given, which the solver
+checks, and `"edges"` is the same shape for you to place:
+
+```openscad
+sketch(name = "bracket", strict = true) {
+  e = polyline([[0, 0], [40, 0], [40, 10], [25, 30], [0, 30]], constrain = "edges");
+  fix(e[0].start, [5, 5]);
+  fillet(e[2].start, 3);
+}
+```
+
+The handles take any further constraint, and one that repeats or
+contradicts a generated constraint is reported against it by name,
+`polyline(): length(edge 0, 40)`, as `sketch-redundant` or
+`sketch-conflict`. A point repeated in the list is a zero-length edge,
+an error naming both indices (`sketch-zero-length`, below).
+`construction = true` makes helper lines. Messages name the points
+`e[i].start`.
 
 ## Constraints
 
@@ -620,6 +682,19 @@ sketch(name = "placed") {
   l1 = line(o, a); l2 = line(a, b); l3 = line(b, o);
   fix(o); fix(a);
   distance(o, b, 4, along = "x"); distance(o, b, 5, along = "y");
+}
+```
+
+### sketch-zero-length
+
+Error: a line of no length, which is two names for one point: a
+`polyline()` whose list repeats a point, or `length(l, 0)`. The message
+names the points, which the solver would otherwise report only as
+corners that turn the wrong way and freedoms left over.
+
+```openscad expect=sketch-zero-length
+sketch(name = "repeat") {
+  e = polyline([[0, 0], [10, 0], [10, 0], [10, 5]], constrain = "fixed");
 }
 ```
 

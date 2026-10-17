@@ -451,6 +451,21 @@ returns = "sketch entity"
 example = "sketch() { c = circle([0, 0], r = 5); fix(c.center); }"
 notes = "In a sketch body this is the sketch circle, not OpenSCAD's circle() module."
 
+[[function]]
+name = "polyline"
+signature = "polyline(points, closed = true, constrain = \"none\", construction = false)"
+summary = "Sketch points drawn at each [x, y] of a list and lines joining them in order, as a list of lines; with constrain, the constraints that hold the drawn shape."
+extension = "sketch"
+params = [
+    "points: list of [x, y] -- where each point is drawn; at least 3 when closed, 2 when not",
+    "closed: bool = true -- a line from the last point back to the first",
+    "constrain: string = \"none\" -- \"none\": entities only; \"edges\": each edge but a closed polyline's last keeps its drawn run and rise (horizontal() or vertical() and length() when it is axis-aligned, distance(..., along = \"x\") and along = \"y\" otherwise), so only the position is free; \"fixed\": the edges, and the first point fixed where drawn",
+    "construction: bool = false -- helper lines, not part of the profile",
+]
+returns = "list of sketch lines: e[i] runs from point i (e[i].start) to point i + 1 (e[i].end)"
+example = "sketch(name = \"bracket\", strict = true) {\n  e = polyline([[0, 0], [40, 0], [40, 10], [25, 30], [0, 30]], constrain = \"fixed\");\n  fillet(e[2].start, 3);\n}"
+notes = "The generated constraints are those a fully dimensioned drawing has, so constrain = \"fixed\" with strict = true solves to exactly the points given; add your own to the handles (a fillet, or fix(e[0].start, at) with constrain = \"edges\"), and a redundant or conflicting one is reported against the generated constraint it repeats, as polyline(): length(edge 0, 40). Two consecutive equal points are an error naming them (sketch-zero-length), as length(l, 0) is. The point labels in messages are e[i].start."
+
 [[module]]
 name = "coincident"
 signature = "coincident(a, b)"
@@ -1048,6 +1063,26 @@ example = "module clearance() {\n  echo(gap = child_distance(0, 1));\n  children
 notes = "Measured on the rendered children as measure --between measures two parts: 0 when they overlap by more than a sliver, one inside the other included; otherwise the exact smallest distance between their surfaces, which is 0 where they touch. Two 2D children are compared in the plane. Both children are rendered through the shared geometry cache, and the call counts as one query against the queries resource limit. A later children(a) or children(b) reuses the instantiated child as with child_anchors(). Without --enable query it is an unknown function, as in OpenSCAD."
 
 [[function]]
+name = "world_transform"
+signature = "world_transform()"
+summary = "The 4x4 matrix of every transform around this point: it maps the current coordinates to the model's top-level coordinates."
+extension = "query"
+params = []
+returns = "[[a, b, c, x], [d, e, f, y], [g, h, i, z], [0, 0, 0, 1]], as multmatrix() takes it; undef with a warning under resize() or rotate_extrude() (query-no-transform)"
+example = "module stick(tag, s) {\n  echo(tag, world = world_transform());\n  cube(s);\n}\ntranslate([10, 0, 0]) rotate(90) stick(\"post\", [2, 4, 6]);"
+notes = "The product, outermost first, of translate(), rotate(), scale(), mirror() and multmatrix() around the statement running now, whether they are written around it, around a module's call, or around the children() that put it in place; a centred linear_extrude() moves its profile down by half the height and projection() flattens z, as for child_anchors(). A transform's own arguments are evaluated outside it. A statement or module call that reads it is never replayed by the memos, so the answer is always the place it runs; inside a child that a query (child_bounds() and the rest) instantiates early, it is the query's place. Without --enable query it is an unknown function, as in OpenSCAD."
+
+[[function]]
+name = "to_world"
+signature = "to_world(p)"
+summary = "A point (or a list of points) in the current coordinates, in the model's top-level coordinates: world_transform() applied to it."
+extension = "query"
+params = ["p: [x, y], [x, y, z] or a list of them -- a 2D point has z = 0"]
+returns = "[x, y, z], or a list of them; undef with a warning for anything else, or where world_transform() has no answer"
+example = "module stick(tag, s) {\n  echo(tag, from = to_world([0, 0, 0]), to = to_world(s));\n  cube(s);\n}\ntranslate([10, 20, 30]) mirror([1, 0, 0]) rotate([0, 0, 90]) stick(\"post\", [2, 4, 6]);"
+notes = "For cut lists and drawings: a library module can report where each part it makes ends up, under whatever transforms its caller wrote. Negative zeros print as 0. Without --enable query it is an unknown function, as in OpenSCAD."
+
+[[function]]
 name = "echo"
 signature = "echo(values...) expression"
 summary = "Print values, then return the expression's value (for tracing functions)."
@@ -1072,6 +1107,15 @@ returns = "the expression's value"
 example = "echo(let (a = 2, b = a * 3) a + b);  // 8"
 
 # --- special variables -------------------------------------------------------------
+
+[[variable]]
+name = "$neoscad_features"
+signature = "$neoscad_features = [\"sketch\", \"query\", ...]"
+summary = "NeoSCAD extension, not in OpenSCAD: the names of the NeoSCAD extensions turned on (--enable part, sketch, query, exact, fillet), so a library can use them and fall back to plain OpenSCAD elsewhere."
+params = []
+returns = "list of strings in the order part, sketch, query, exact, fillet; undefined (as in OpenSCAD) when none is on"
+example = "function neoscad_feature(name) =\n  !is_undef($neoscad_features) && [for (f = $neoscad_features) if (f == name) f] != [];\nUSE_SKETCH = neoscad_feature(\"sketch\");\necho(USE_SKETCH = USE_SKETCH);"
+notes = "Bound only when at least one extension is on, so with none a file runs exactly as in OpenSCAD, where the name is an unknown variable. is_undef($neoscad_features) tests it without a warning in both, and && stops before the list is read, so the pattern in the example is safe in stock OpenSCAD. A file that calls sketch() or child_bounds() only behind such a test, with a polygon() or a typed-in size in the other branch, renders in both programs; neither branch is evaluated unless taken."
 
 [[variable]]
 name = "$fn"

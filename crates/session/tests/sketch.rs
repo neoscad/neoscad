@@ -87,7 +87,7 @@ fn golden_models() {
         compare(&p.with_extension("csg"), &csg, &mut failures);
         // The diagnostics models' JSON: codes, spans and hints with their
         // edits, as `check` and the language server get them.
-        if matches!(name, "diagnostics.scad" | "hints.scad") {
+        if matches!(name, "diagnostics.scad" | "hints.scad" | "polyline.scad") {
             let r = s.evaluate(&run(name, true), false).unwrap();
             let mut json = serde_json::to_string_pretty(&r.log.diagnostics_json()).unwrap();
             json.push('\n');
@@ -653,6 +653,10 @@ fn every_hint_edit_fixes_its_problem() {
     assert_eq!(hint_edits_fix_their_problems("fillets.scad"), 1);
     // And at a corner of two arcs.
     assert_eq!(hint_edits_fix_their_problems("arc-corners.scad"), 1);
+    // `polyline()`'s: constraints suggested for an unconstrained one
+    // (6 + 1), the fix a strict one with its edges alone lacks, and the
+    // written constraint that repeats or contradicts the generated ones.
+    assert_eq!(hint_edits_fix_their_problems("polyline.scad"), 10);
 }
 
 /// Apply each edit of the golden `name`'s hints alone and check that its
@@ -925,4 +929,36 @@ fn a_sketch_snapshot_shows_entities_and_constraint_states() {
     req.issues = Some(Default::default());
     let e = s.snapshot(&req).unwrap_err().to_string();
     assert!(e.contains("cannot be combined"), "{e}");
+}
+
+/// `polyline(P, constrain = "fixed")` is the profile helper users wrote by
+/// hand (a point per element, a line per edge, the first point fixed, and
+/// each edge but the last dimensioned as drawn): the same solved shape,
+/// fully determined under `strict`, with no diagnostics.
+#[test]
+fn polyline_is_the_hand_written_profile() {
+    let text = b"P = [[0, 0], [40, 0], [40, 10], [25, 30], [-5, 30], [-5, 12]];\n\
+module profile(name, P) sketch(name = name, strict = true) {\n\
+  n = len(P);\n\
+  q = [for (p = P) point(p)];\n\
+  e = [for (i = [0 : n - 1]) line(q[i], q[(i + 1) % n])];\n\
+  fix(q[0]);\n\
+  for (i = [0 : n - 2]) let (d = P[(i + 1) % n] - P[i]) {\n\
+    if (d[1] == 0) { horizontal(e[i]); length(e[i], abs(d[0])); }\n\
+    else if (d[0] == 0) { vertical(e[i]); length(e[i], abs(d[1])); }\n\
+    else { distance(q[i], q[i + 1], d[0], along = \"x\"); distance(q[i], q[i + 1], d[1], along = \"y\"); }\n\
+  }\n\
+}\n\
+profile(\"hand\", P);\n\
+translate([0, 0]) sketch(name = \"built\", strict = true) { e = polyline(P, constrain = \"fixed\"); }\n";
+    let (s, _) = session(&[("m.scad", text)]);
+    let (log, csg) = evaluate(&s, "m.scad", true);
+    assert_eq!(log, "", "{log}");
+    let polygons: Vec<&str> = csg.lines().filter(|l| l.contains("polygon(")).collect();
+    assert_eq!(polygons.len(), 2, "{csg}");
+    assert_eq!(polygons[0].trim(), polygons[1].trim(), "{csg}");
+    assert!(
+        polygons[0].contains("[[0, 0], [40, 0], [40, 10], [25, 30], [-5, 30], [-5, 12]]"),
+        "{csg}"
+    );
 }
