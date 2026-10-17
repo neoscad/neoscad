@@ -543,3 +543,47 @@ fn quiet_echo_export_keeps_only_errors_as_the_nightly_does() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn part_svg_and_dxf_keep_parts_apart() {
+    let d = scratch("part-layers");
+    let wall = "part(\"plate\") color(\"red\") square([48, 2]);\n\
+                for (i = [0:2]) part(str(\"stud\", i)) translate([i * 16, 2]) square([2, 90]);\n\
+                translate([60, 0]) square(5);\n";
+    std::fs::write(d.join("wall.scad"), wall).unwrap();
+    std::fs::write(d.join("union.scad"), wall.replace("part(", "group(")).unwrap();
+    for f in ["svg", "dxf"] {
+        let out = neoscad(
+            &d,
+            &["--enable", "part", "-o", &format!("w.{f}"), "wall.scad"],
+        );
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let out = neoscad(
+            &d,
+            &["--enable", "part", "-o", &format!("u.{f}"), "union.scad"],
+        );
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    }
+    let svg = std::fs::read_to_string(d.join("w.svg")).unwrap();
+    assert_eq!(svg.matches("<g id=").count(), 4);
+    assert!(svg.contains(
+        "<g id=\"plate\">\n<path d=\"\nM 48,-2 L 0,-2 L 0,-0 L 48,-0 z\n\" stroke=\"#ff0000\""
+    ));
+    // Without parts the file is the plain export's.
+    let union = std::fs::read_to_string(d.join("u.svg")).unwrap();
+    assert!(!union.contains("<g "));
+    assert_eq!(svg.lines().nth(2), union.lines().nth(2));
+    // Each part reads back on its own: by `id` from the SVG, by `layer`
+    // from the DXF.
+    std::fs::write(
+        d.join("back.scad"),
+        "import(\"w.svg\", id = \"stud1\", dpi = 25.4);\ntranslate([0, 200]) import(\"w.dxf\", layer = \"stud2\");\n",
+    )
+    .unwrap();
+    let out = neoscad(&d, &["-o", "back.svg", "back.scad"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let back = std::fs::read_to_string(d.join("back.svg")).unwrap();
+    assert_eq!(back.matches(" z\n").count(), 2, "{back}");
+    assert!(back.contains("viewBox=\"16 -293 19 105\""), "{back}");
+    let _ = std::fs::remove_dir_all(&d);
+}

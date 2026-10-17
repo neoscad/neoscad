@@ -10,7 +10,7 @@ server and a long-running `serve` mode.
 NeoSCAD extends OpenSCAD with three language extensions, all off by
 default so that a file means exactly what it means in OpenSCAD: named
 parts (`part("lid") { ... }`, `--enable part`), which `check` and
-`measure` report on one by one; constrained 2D sketches
+`measure` report on one by one and SVG and DXF exports keep apart; constrained 2D sketches
 (`sketch() { ... }`, `--enable sketch`): points, lines, arcs and circles
 tied by constraints and solved into a 2D shape, as in FreeCAD's
 Sketcher (`docs/sketch.md`); and geometry queries (`--enable query`):

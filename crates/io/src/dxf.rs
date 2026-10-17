@@ -541,9 +541,101 @@ const DXF_TABLES: &str = "  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nTABLE\n  
 /// shape entirely left of or below the origin keeps `2.22507e-308` as its
 /// maximum. That is copied so the files compare equal.
 pub fn write(outlines: &[Outline]) -> Vec<u8> {
+    write_with(
+        outlines.iter().map(|o| ("0", o)),
+        outlines.iter(),
+        DXF_TABLES,
+    )
+}
+
+/// [`write`] with the model's parts kept apart (NeoSCAD's `--enable
+/// part`): each part's entities on a layer named after it (characters
+/// DXF does not allow in a name become `_`), the geometry outside every
+/// part on layer `0`, and each part's layer in the LAYER table with the
+/// AutoCAD colour index nearest its `color()` (7, black or white, without
+/// one). The extents are every layer's.
+pub fn write_layers(layers: &[crate::Layer<'_>]) -> Vec<u8> {
+    let names: Vec<String> = layers
+        .iter()
+        .map(|l| l.name.map_or_else(|| "0".to_string(), layer_name))
+        .collect();
+    let mut entries = String::new();
+    let mut seen: Vec<&str> = vec!["0"];
+    for (l, name) in layers.iter().zip(&names) {
+        if seen.contains(&name.as_str()) {
+            continue;
+        }
+        seen.push(name);
+        let aci = l.color.map_or(7, nearest_aci);
+        entries.push_str(&format!(
+            "  0\nLAYER\n  2\n{name}\n 70\n64\n 62\n{aci}\n  6\nCONTINUOUS\n"
+        ));
+    }
+    // The table's count is a maximum, which OpenSCAD writes as 6.
+    let table = format!(
+        "  0\nTABLE\n  2\nLAYER\n 70\n{}\n  0\nLAYER\n  2\n0\n 70\n64\n 62\n7\n  6\nCONTINUOUS\n{entries}",
+        seen.len().max(6)
+    );
+    let default_layer =
+        "  0\nTABLE\n  2\nLAYER\n 70\n6\n  0\nLAYER\n  2\n0\n 70\n64\n 62\n7\n  6\nCONTINUOUS\n";
+    let tables = DXF_TABLES.replacen(default_layer, &table, 1);
+    write_with(
+        layers
+            .iter()
+            .zip(&names)
+            .flat_map(|(l, n)| l.outlines.iter().map(move |o| (n.as_str(), o))),
+        layers.iter().flat_map(|l| l.outlines.iter()),
+        &tables,
+    )
+}
+
+/// A part name as a DXF layer name: the characters AutoCAD refuses in
+/// one (`<>/\\":;?*|=,` and the backquote, and control characters)
+/// replaced by `_`.
+fn layer_name(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>/\\\":;?*|=,`".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if s.is_empty() { "_".into() } else { s }
+}
+
+/// The AutoCAD colour index (1 to 9) nearest an RGB colour.
+fn nearest_aci(c: [f32; 4]) -> u8 {
+    const ACI: [(u8, [f32; 3]); 9] = [
+        (1, [1.0, 0.0, 0.0]),
+        (2, [1.0, 1.0, 0.0]),
+        (3, [0.0, 1.0, 0.0]),
+        (4, [0.0, 1.0, 1.0]),
+        (5, [0.0, 0.0, 1.0]),
+        (6, [1.0, 0.0, 1.0]),
+        (7, [0.0, 0.0, 0.0]),
+        (8, [0.5, 0.5, 0.5]),
+        (9, [0.75, 0.75, 0.75]),
+    ];
+    let d = |p: [f32; 3]| (0..3).map(|i| (p[i] - c[i]).powi(2)).sum::<f32>();
+    ACI.iter()
+        .fold((7, f32::MAX), |best, &(i, p)| {
+            let dist = d(p);
+            if dist < best.1 { (i, dist) } else { best }
+        })
+        .0
+}
+
+fn write_with<'a>(
+    entities: impl Iterator<Item = (&'a str, &'a Outline)>,
+    all: impl Iterator<Item = &'a Outline>,
+    tables: &str,
+) -> Vec<u8> {
     let (mut x_min, mut y_min) = (f64::MAX, f64::MAX);
     let (mut x_max, mut y_max) = (f64::MIN_POSITIVE, f64::MIN_POSITIVE);
-    for v in outlines.iter().flat_map(|o| o.vertices.iter()) {
+    for v in all.flat_map(|o| o.vertices.iter()) {
         if x_min > v[0] {
             x_min = v[0];
         }
@@ -566,20 +658,20 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
     out.push_str(&format!(
         "  9\n$LINMIN\n 10\n{x0}\n 20\n{y0}\n  9\n$LINMAX\n 10\n{x1}\n 20\n{y1}\n"
     ));
-    out.push_str(DXF_TABLES);
+    out.push_str(tables);
     out.push_str("  0\nSECTION\n  2\nENTITIES\n");
-    for o in outlines {
+    for (layer, o) in entities {
         match o.vertices.as_slice() {
-            [a] => out.push_str(&format!("  0\nPOINT\n100\nAcDbEntity\n  8\n0\n100\nAcDbPoint\n 10\n{}\n 20\n{}\n", fmt_g(a[0]), fmt_g(a[1]))),
+            [a] => out.push_str(&format!("  0\nPOINT\n100\nAcDbEntity\n  8\n{layer}\n100\nAcDbPoint\n 10\n{}\n 20\n{}\n", fmt_g(a[0]), fmt_g(a[1]))),
             [a, b] => out.push_str(&format!(
-                "  0\nLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbLine\n 10\n{}\n 20\n{}\n 11\n{}\n 21\n{}\n",
+                "  0\nLINE\n100\nAcDbEntity\n  8\n{layer}\n100\nAcDbLine\n 10\n{}\n 20\n{}\n 11\n{}\n 21\n{}\n",
                 fmt_g(a[0]),
                 fmt_g(a[1]),
                 fmt_g(b[0]),
                 fmt_g(b[1])
             )),
             vs => {
-                out.push_str(&format!("  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n0\n100\nAcDbPolyline\n 90\n{}\n 70\n1\n", vs.len()));
+                out.push_str(&format!("  0\nLWPOLYLINE\n100\nAcDbEntity\n  8\n{layer}\n100\nAcDbPolyline\n 90\n{}\n 70\n1\n", vs.len()));
                 for v in vs {
                     out.push_str(&format!(" 10\n{}\n 20\n{}\n", fmt_g(v[0]), fmt_g(v[1])));
                 }
@@ -742,5 +834,61 @@ mod tests {
         let mut v = out[0].vertices.clone();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(v, vec![[0.0, 0.0], [0.0, 2.0], [2.0, 0.0], [2.0, 2.0]]);
+    }
+
+    #[test]
+    fn layers_read_back_one_at_a_time() {
+        let sq = |x: f64| Outline::new(vec![[x, 0.0], [x + 2.0, 0.0], [x + 2.0, 2.0], [x, 2.0]]);
+        let (rest, stud, plate) = ([sq(0.0)], [sq(4.0), sq(8.0)], [sq(12.0)]);
+        let layers = [
+            crate::Layer {
+                name: None,
+                color: None,
+                outlines: &rest,
+            },
+            crate::Layer {
+                name: Some("wall.stud"),
+                color: Some([0.9, 0.1, 0.1, 1.0]),
+                outlines: &stud,
+            },
+            crate::Layer {
+                name: Some("top/plate"),
+                color: None,
+                outlines: &plate,
+            },
+        ];
+        let bytes = write_layers(&layers);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains("  0\nLAYER\n  2\nwall.stud\n 70\n64\n 62\n1\n"));
+        assert!(text.contains("  0\nLAYER\n  2\ntop_plate\n 70\n64\n 62\n7\n"));
+        let count = |layer: &str| {
+            let req = Request {
+                file: "f",
+                display: "f",
+                layer,
+                origin: [0.0, 0.0],
+                scale: 1.0,
+            };
+            read(Some(&bytes), &req, &Fixed36, &mut |w| panic!("{w}"))
+                .to_outlines()
+                .len()
+        };
+        assert_eq!(
+            (
+                count("0"),
+                count("wall.stud"),
+                count("top_plate"),
+                count("")
+            ),
+            (1, 2, 1, 4)
+        );
+        // One layer of everything is the plain writer's file.
+        let all = [sq(0.0)];
+        let one = [crate::Layer {
+            name: None,
+            color: None,
+            outlines: &all,
+        }];
+        assert_eq!(write_layers(&one), write(&all));
     }
 }

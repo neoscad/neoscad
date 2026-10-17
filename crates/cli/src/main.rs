@@ -168,7 +168,8 @@ struct Cli {
     parameter_set: Option<String>,
 
     /// `part` turns on NeoSCAD's `part("name") { ... }` extension (named
-    /// parts for `check` and `measure`), `sketch` its constrained 2D
+    /// parts for `check` and `measure`, kept apart in SVG and DXF
+    /// exports), `sketch` its constrained 2D
     /// sketches (`sketch() { ... }`), `query` its geometry queries
     /// (`anchor()`, `child_anchors()`, `child_bounds()`,
     /// `child_measure()`, `child_distance()`), `exact` STEP export

@@ -257,13 +257,57 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
 /// by half the stroke when there is one, then one path with every outline,
 /// y flipped (so `0` prints as `-0`), six points to a line.
 pub fn write_styled(outlines: &[Outline], style: &SvgStyle) -> Vec<u8> {
-    let stroke_width = style.stroke_width;
+    let mut out = header(outlines.iter(), style);
+    push_path(&mut out, outlines, style, None);
+    out.push_str("</svg>\n");
+    out.into_bytes()
+}
+
+/// [`write_styled`] with the model's parts kept apart (NeoSCAD's
+/// `--enable part`): the same view box around every layer's outlines,
+/// then the geometry outside every part as the plain path, then each part
+/// as `<g id="NAME">` around its own path, in the order given. A part's
+/// colour replaces the style's stroke and fill colours (whichever are on),
+/// with its alpha as `stroke-opacity`/`fill-opacity` when below 1.
+pub fn write_layers(layers: &[crate::Layer<'_>], style: &SvgStyle) -> Vec<u8> {
+    let mut out = header(layers.iter().flat_map(|l| l.outlines.iter()), style);
+    for l in layers {
+        match l.name {
+            None => push_path(&mut out, l.outlines, style, l.color),
+            Some(name) => {
+                out.push_str(&format!("<g id=\"{}\">\n", xml_attr(name)));
+                push_path(&mut out, l.outlines, style, l.color);
+                out.push_str("</g>\n");
+            }
+        }
+    }
+    out.push_str("</svg>\n");
+    out.into_bytes()
+}
+
+/// `s` escaped for a double-quoted XML attribute.
+fn xml_attr(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            _ => o.push(c),
+        }
+    }
+    o
+}
+
+/// The XML prolog, the `<svg>` element sized to `outlines` and the title.
+fn header<'a>(outlines: impl Iterator<Item = &'a Outline>, style: &SvgStyle) -> String {
     let pad = if style.stroke.is_some() {
-        stroke_width / 2.0
+        style.stroke_width / 2.0
     } else {
         0.0
     };
-    let mut it = outlines.iter().flat_map(|o| o.vertices.iter());
+    let mut it = outlines.flat_map(|o| o.vertices.iter());
     let (lo, hi) = match it.next() {
         Some(&first) => it.fold((first, first), |(lo, hi), v| {
             (
@@ -284,7 +328,14 @@ pub fn write_styled(outlines: &[Outline], style: &SvgStyle) -> Vec<u8> {
     out.push_str(&format!(
         "<svg width=\"{width}mm\" height=\"{height}mm\" viewBox=\"{minx} {miny} {width} {height}\" xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">\n"
     ));
+    // OpenSCAD's title, kept: its export tests compare the file as text.
     out.push_str("<title>OpenSCAD Model</title>\n");
+    out
+}
+
+/// One `<path>` with every outline of `outlines`, painted by `style`, or
+/// in `color` where the style paints at all.
+fn push_path(out: &mut String, outlines: &[Outline], style: &SvgStyle, color: Option<[f32; 4]>) {
     out.push_str("<path d=\"\n");
     for o in outlines {
         let Some(p0) = o.vertices.first() else {
@@ -299,14 +350,27 @@ pub fn write_styled(outlines: &[Outline], style: &SvgStyle) -> Vec<u8> {
         }
         out.push_str(" z\n");
     }
+    let paint = |p: &Option<String>| match (p, color) {
+        (None, _) => "none".to_string(),
+        (Some(_), Some(c)) => crate::hex_rgb(c),
+        (Some(p), None) => p.clone(),
+    };
     out.push_str(&format!(
-        "\" stroke=\"{}\" fill=\"{}\" stroke-width=\"{}\"/>\n",
-        style.stroke.as_deref().unwrap_or("none"),
-        style.fill.as_deref().unwrap_or("none"),
-        fmt_g(stroke_width)
+        "\" stroke=\"{}\" fill=\"{}\" stroke-width=\"{}\"",
+        paint(&style.stroke),
+        paint(&style.fill),
+        fmt_g(style.stroke_width)
     ));
-    out.push_str("</svg>\n");
-    out.into_bytes()
+    if let Some(c) = color.filter(|c| c[3] < 1.0) {
+        let a = fmt_g(f64::from(c[3].max(0.0)));
+        if style.stroke.is_some() {
+            out.push_str(&format!(" stroke-opacity=\"{a}\""));
+        }
+        if style.fill.is_some() {
+            out.push_str(&format!(" fill-opacity=\"{a}\""));
+        }
+    }
+    out.push_str("/>\n");
 }
 
 #[cfg(test)]
@@ -401,5 +465,44 @@ mod tests {
         assert!((span - 2.0).abs() < 1e-6, "{span}");
         let (out, _) = read_str(r#"<svg><path d="M 0 0 L 10 0 L 0 10 z"/></svg>"#, &DEFAULT);
         assert_eq!(out[0][0].vertices.len(), 4);
+    }
+
+    #[test]
+    fn layers_are_groups_with_their_colours() {
+        let sq = |x: f64| Outline::new(vec![[x, 0.0], [x + 1.0, 0.0], [x + 1.0, 1.0], [x, 1.0]]);
+        let (rest, stud) = ([sq(0.0)], [sq(2.0)]);
+        let layers = [
+            crate::Layer {
+                name: None,
+                color: None,
+                outlines: &rest,
+            },
+            crate::Layer {
+                name: Some("wall.\"stud\""),
+                color: Some([1.0, 0.0, 0.0, 0.5]),
+                outlines: &stud,
+            },
+        ];
+        let svg = String::from_utf8(write_layers(&layers, &SvgStyle::default())).unwrap();
+        // One view box around both, as for the union of the two.
+        let both = String::from_utf8(write(&[sq(0.0), sq(2.0)])).unwrap();
+        let head = |s: &str| s.lines().take(4).collect::<Vec<_>>().join("\n");
+        assert_eq!(head(&svg), head(&both));
+        assert!(svg.contains(
+            "\" stroke=\"black\" fill=\"none\" stroke-width=\"0.35\"/>\n<g id=\"wall.&quot;stud&quot;\">\n<path d=\"\nM 2,-0"
+        ));
+        assert!(svg.ends_with(
+            "\" stroke=\"#ff0000\" fill=\"none\" stroke-width=\"0.35\" stroke-opacity=\"0.5\"/>\n</g>\n</svg>\n"
+        ));
+        // The exported groups are what `import(id = ...)` selects.
+        let opts = Options {
+            id: Some("wall.\"stud\""),
+            layer: None,
+            dpi: 96.0,
+            center: false,
+        };
+        let (shapes, msgs) = read_str(&svg, &opts);
+        assert!(msgs.is_empty(), "{msgs:?}");
+        assert_eq!(shapes.len(), 1);
     }
 }

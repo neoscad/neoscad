@@ -375,11 +375,11 @@ notes = "A failed assert fails `neoscad test`."
 [[module]]
 name = "part"
 signature = "part(name) children"
-summary = "Name a piece of the model for check, measure and snapshot."
+summary = "Name a piece of the model for check, measure, snapshot and 2D exports."
 extension = "part"
 params = ["name: string -- the part's name; nested parts get dotted names"]
 example = "part(\"lid\") translate([0, 0, 10]) cube([20, 20, 2]);"
-notes = "Without --enable part it is an unknown module, as in OpenSCAD. See docs/cli-json.md, Named parts."
+notes = "An SVG or DXF export keeps each part apart: a <g id=\"name\"> group or a DXF layer of that name, drawn in the part's color(). Without --enable part it is an unknown module, as in OpenSCAD. See docs/cli-json.md, Named parts."
 
 # --- constrained sketches (--enable sketch) -----------------------------------
 #

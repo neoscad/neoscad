@@ -116,6 +116,34 @@ pub struct Encoded {
     pub warnings: Vec<String>,
 }
 
+/// [`encode`], with an SVG or DXF file split into `layers` when there are
+/// any (`--enable part` on a model with parts; [`crate::layers`]). The
+/// other formats, and a model without parts, are encoded as by
+/// [`encode`].
+pub fn encode_layered(
+    format: Format,
+    root: &Geometry,
+    layers: &[crate::layers::Layer],
+    s: &Settings,
+    mesh: &mut Option<PolySet>,
+) -> Encoded {
+    if layers.is_empty() || !matches!(root, Geometry::Polygon2d(_)) {
+        return encode(format, root, s, mesh);
+    }
+    let io_layers: Vec<io::Layer<'_>> = layers.iter().map(crate::layers::Layer::io).collect();
+    match format {
+        Format::Svg => Encoded {
+            data: io::svg::write_layers(&io_layers, &s.svg),
+            ..Encoded::default()
+        },
+        Format::Dxf => Encoded {
+            data: io::dxf::write_layers(&io_layers),
+            ..Encoded::default()
+        },
+        _ => encode(format, root, s, mesh),
+    }
+}
+
 /// Encode `root` (non-empty, of `format`'s dimension) as `format`. `mesh`
 /// caches the 3D mesh between several outputs of one result.
 pub fn encode(

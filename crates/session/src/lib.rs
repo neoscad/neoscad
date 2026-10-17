@@ -60,6 +60,7 @@ pub mod exact;
 pub mod export;
 pub mod fillets;
 pub mod format;
+pub mod layers;
 pub mod measure;
 pub mod memory;
 pub mod mesh;
@@ -2276,6 +2277,38 @@ impl Session {
                 .union(self.cfg.features)
                 .has(eval::Feature::PredictibleOutput);
             let mut mesh = None;
+            // `--enable part`: SVG and DXF files keep the parts apart, as
+            // the command line's do (`crates/cli/src/run.rs`).
+            let top = ev.root.find_root_tag().0.unwrap_or(&ev.root);
+            let split = match root.as_ref() {
+                Some(geom::Geometry::Polygon2d(p))
+                    if run
+                        .extensions
+                        .union(self.cfg.extensions)
+                        .has(eval::Extension::Part)
+                        && req.outputs.iter().any(|(_, f)| {
+                            matches!(f, export::Format::Svg | export::Format::Dxf)
+                        })
+                        && layers::has_parts(top) =>
+                {
+                    let (_, fonts) = self.fonts_for(&loaded.used(), &*pipe.fs);
+                    let opts = geom::RenderOptions {
+                        // The model's render printed every message already.
+                        replay: None,
+                        ..Self::render_options(&pipe, &loaded, &scheme, Mode::Render, &job, fonts)
+                    };
+                    let fs = pipe.fs.clone();
+                    let made = layers::split(top, p, &mut |tree| {
+                        let keys = eval::dump::Keys::new(tree, &*fs);
+                        renderer.render(tree, &keys, opts.clone()).ok()?.geometry
+                    });
+                    if job.stopped() {
+                        return Err(self.interrupted(&mut pipe, &loaded, &job));
+                    }
+                    made
+                }
+                _ => Vec::new(),
+            };
             for (target, format) in &req.outputs {
                 // `checkAndExport`, per output: the dimension, then
                 // emptiness.
@@ -2327,7 +2360,7 @@ impl Session {
                     }
                     continue;
                 }
-                let enc = export::encode(*format, root, &settings, &mut mesh);
+                let enc = export::encode_layered(*format, root, &split, &settings, &mut mesh);
                 for (severity, line) in &enc.immediate {
                     pipe.con.print(*severity, line.as_bytes());
                 }

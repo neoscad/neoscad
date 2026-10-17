@@ -842,6 +842,28 @@ fn render_frame<W: Write>(
     let mut summary_camera = ev.camera;
     let mut mesh = None;
     let mut settings = None;
+    // `--enable part`: SVG and DXF files keep the parts apart.
+    let layers = match root.as_ref() {
+        Some(geom::Geometry::Polygon2d(p))
+            if options.extensions.has(eval::Extension::Part)
+                && formats
+                    .iter()
+                    .any(|f| matches!(f, MeshFormat::Svg | MeshFormat::Dxf))
+                && session::layers::has_parts(top) =>
+        {
+            let fs = &*loaded.host.fs;
+            session::layers::split(top, p, &mut |tree| {
+                let keys = eval::dump::Keys::new(tree, fs);
+                // The model's render printed every message already.
+                let opts = geom::RenderOptions {
+                    replay: None,
+                    ..opts.clone()
+                };
+                renderer.render(tree, &keys, opts).ok()?.geometry
+            })
+        }
+        _ => Vec::new(),
+    };
     for (target, format) in job.outputs.iter().zip(formats) {
         let target = &frame_target(target, frame.number);
         if *format == MeshFormat::Png {
@@ -896,7 +918,8 @@ fn render_frame<W: Write>(
             continue;
         }
         let settings = settings.get_or_insert_with(|| export_settings(job, options, &opts));
-        let enc = session::export::encode(format.session(), root, settings, &mut mesh);
+        let enc =
+            session::export::encode_layered(format.session(), root, &layers, settings, &mut mesh);
         for (severity, line) in &enc.immediate {
             con.print(*severity, line.as_bytes());
         }

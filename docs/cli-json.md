@@ -471,12 +471,65 @@ module always wins over the extension.
   the extension is on.
 - Each output face remembers its part through Manifold's original IDs,
   across booleans and colours; faces a `difference()` cuts into a part
-  belong to that part. Parts are tracked in 3D only.
+  belong to that part. Faces are tracked in 3D only; 2D exports split
+  by part as below.
 - A part's own solid (for `measure` and the checks between parts) is
   its subtree's geometry, placed by the transforms above it. When an
   operation above it changes what reaches the model, the part's
   `context` names it: `difference` (a subtracted part), `intersection`,
   `hull`, `minkowski`, `resize`, or `2d` (projected, extruded, offset).
+
+## SVG and DXF exports by part
+
+With the extension on, an SVG or DXF export of a model that has parts
+keeps them apart instead of writing the 2D result as one union, so a
+drawing of touching members (a stud wall, a floor's joists) keeps every
+member's outline:
+
+    neoscad --enable part -o wall.svg wall.scad
+    neoscad --enable part -o wall.dxf wall.scad
+
+```openscad
+part("bottom_plate") color("peru") square([1200, 38]);
+for (i = [0:3])
+    part(str("stud", i)) color("steelblue")
+        translate([i * 400, 38]) square([38, 2300]);
+```
+
+- **SVG:** the geometry outside every part first, as the plain export's
+  single `<path>`; then each part name, in order of first appearance, as
+  `<g id="NAME">` around one `<path>` of its outlines. A part's
+  `color()` replaces the stroke colour (and the fill colour, with
+  `-O export-svg/fill=true`), its alpha as `stroke-opacity` /
+  `fill-opacity`; a part without one keeps the `-O export-svg/...`
+  colours. The view box, title and stroke width are the plain export's.
+  `import("wall.svg", id = "stud2")` reads one part back.
+- **DXF:** each part's entities on a layer named after it (characters a
+  DXF layer name cannot hold, `<>/\":;?*|=,` and the backquote, become
+  `_`), listed in the LAYER table with the AutoCAD colour index nearest
+  its `color()` (7 without one); the rest on layer `0`.
+  `import("wall.dxf", layer = "stud2")` reads one part back.
+- **Which colour:** the innermost `color()` around the `part()` call, or
+  one directly inside it around all its children
+  (`part("x") color("red") ...`).
+- **Nested parts** are layers of their own (`wall.stud`); the outer part
+  has what is in it outside them.
+- **What a part draws** is its own geometry as it reaches the model: the
+  tree pruned to the part's leaves, keeping every operation above them,
+  then clipped to the model's 2D result. A part cut by a `difference()`
+  keeps the cut; a part that is itself subtracted draws nothing (its cut
+  shows in the outline that holds it); parts inside `projection()`,
+  `offset()` and the other 2D operations stay apart, so a 3D model drawn
+  through `projection()` exports one outline per member. A `hull()`,
+  `minkowski()` or `resize()` over several parts is applied to each part
+  on its own, within the model's outline. Outlines of overlapping parts
+  overlap.
+- **Unchanged otherwise:** without the extension, for a model without
+  parts, and for every other format (PDF included), the file is
+  byte-for-byte the plain export. Every host splits the same way: the
+  command line, `serve`'s `export` with `"enable": ["part"]` or
+  `"parts": true`, and so the apps and MCP tools when the extension is
+  on.
 
 # Sorted exports: `--enable=predictible-output`
 

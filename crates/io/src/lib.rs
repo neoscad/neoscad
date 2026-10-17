@@ -64,6 +64,24 @@ impl Outline {
     }
 }
 
+/// One named group of outlines in a 2D export that keeps the model's
+/// parts apart ([`svg::write_layers`], [`dxf::write_layers`]): a NeoSCAD
+/// `part()` with its colour, or (`name: None`) the geometry outside every
+/// part.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layer<'a> {
+    pub name: Option<&'a str>,
+    /// The part's `color()` as RGBA in `0..=1`, when it has one.
+    pub color: Option<[f32; 4]>,
+    pub outlines: &'a [Outline],
+}
+
+/// A colour's RGB as `#rrggbb`.
+pub fn hex_rgb(c: [f32; 4]) -> String {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
+}
+
 /// A message a reader or writer produced, with OpenSCAD's text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
