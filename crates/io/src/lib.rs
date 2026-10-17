@@ -76,6 +76,15 @@ pub struct Layer<'a> {
     pub outlines: &'a [Outline],
 }
 
+impl Layer<'_> {
+    /// The colour to paint the layer in: [`Layer::color`] unless it is
+    /// the "no colour" `color(undef)` stores (negative components), which
+    /// as paint would be alpha `-1`, an invisible SVG path.
+    pub fn paint(&self) -> Option<[f32; 4]> {
+        self.color.filter(|c| c.iter().all(|v| *v >= 0.0))
+    }
+}
+
 /// A colour's RGB as `#rrggbb`.
 pub fn hex_rgb(c: [f32; 4]) -> String {
     let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;

@@ -550,23 +550,42 @@ pub fn write(outlines: &[Outline]) -> Vec<u8> {
 
 /// [`write`] with the model's parts kept apart (NeoSCAD's `--enable
 /// part`): each part's entities on a layer named after it (characters
-/// DXF does not allow in a name become `_`), the geometry outside every
+/// DXF does not allow in a name become `_`, and a name already taken gets
+/// a `_2`, `_3`... suffix), the geometry outside every
 /// part on layer `0`, and each part's layer in the LAYER table with the
 /// AutoCAD colour index nearest its `color()` (7, black or white, without
 /// one). The extents are every layer's.
 pub fn write_layers(layers: &[crate::Layer<'_>]) -> Vec<u8> {
+    // Distinct parts must stay distinct layers: two names that map to the
+    // same layer name ("p/q" and "p:q", or a part named "0") would
+    // otherwise merge silently. A taken name gets the first free suffix
+    // `_2`, `_3`..., in the order given, compared without case as AutoCAD
+    // compares layer names.
+    let mut seen: Vec<String> = vec!["0".to_string()];
     let names: Vec<String> = layers
         .iter()
-        .map(|l| l.name.map_or_else(|| "0".to_string(), layer_name))
+        .map(|l| {
+            let Some(name) = l.name else {
+                return "0".to_string();
+            };
+            let base = layer_name(name);
+            let taken = |n: &str, seen: &[String]| seen.iter().any(|s| s.eq_ignore_ascii_case(n));
+            let mut n = base.clone();
+            let mut i = 2;
+            while taken(&n, &seen) {
+                n = format!("{base}_{i}");
+                i += 1;
+            }
+            seen.push(n.clone());
+            n
+        })
         .collect();
     let mut entries = String::new();
-    let mut seen: Vec<&str> = vec!["0"];
     for (l, name) in layers.iter().zip(&names) {
-        if seen.contains(&name.as_str()) {
+        if l.name.is_none() {
             continue;
         }
-        seen.push(name);
-        let aci = l.color.map_or(7, nearest_aci);
+        let aci = l.paint().map_or(7, nearest_aci);
         entries.push_str(&format!(
             "  0\nLAYER\n  2\n{name}\n 70\n64\n 62\n{aci}\n  6\nCONTINUOUS\n"
         ));
@@ -606,9 +625,10 @@ fn layer_name(name: &str) -> String {
     if s.is_empty() { "_".into() } else { s }
 }
 
-/// The AutoCAD colour index (1 to 9) nearest an RGB colour.
+/// The AutoCAD colour index (1 to 9) nearest an RGB colour. Index 7 is
+/// drawn black or white against the background, so both map to it.
 fn nearest_aci(c: [f32; 4]) -> u8 {
-    const ACI: [(u8, [f32; 3]); 9] = [
+    const ACI: [(u8, [f32; 3]); 10] = [
         (1, [1.0, 0.0, 0.0]),
         (2, [1.0, 1.0, 0.0]),
         (3, [0.0, 1.0, 0.0]),
@@ -616,6 +636,7 @@ fn nearest_aci(c: [f32; 4]) -> u8 {
         (5, [0.0, 0.0, 1.0]),
         (6, [1.0, 0.0, 1.0]),
         (7, [0.0, 0.0, 0.0]),
+        (7, [1.0, 1.0, 1.0]),
         (8, [0.5, 0.5, 0.5]),
         (9, [0.75, 0.75, 0.75]),
     ];
@@ -890,5 +911,37 @@ mod tests {
             outlines: &all,
         }];
         assert_eq!(write_layers(&one), write(&all));
+    }
+
+    #[test]
+    fn colliding_layer_names_stay_apart() {
+        let sq = |x: f64| Outline::new(vec![[x, 0.0], [x + 2.0, 0.0], [x + 2.0, 2.0], [x, 2.0]]);
+        let shapes: Vec<[Outline; 1]> = (0..5).map(|i| [sq(f64::from(i) * 4.0)]).collect();
+        let names = [None, Some("0"), Some("p/q"), Some("p:q"), Some("P_Q")];
+        let layers: Vec<crate::Layer<'_>> = names
+            .iter()
+            .zip(&shapes)
+            .map(|(name, o)| crate::Layer {
+                name: *name,
+                // `color(undef)`'s "no colour" is layer colour 7.
+                color: Some([-1.0; 4]),
+                outlines: o,
+            })
+            .collect();
+        let text = String::from_utf8(write_layers(&layers)).unwrap();
+        for layer in ["0_2", "p_q", "p_q_2", "P_Q_3"] {
+            assert!(
+                text.contains(&format!("  0\nLAYER\n  2\n{layer}\n 70\n64\n 62\n7\n")),
+                "{layer}"
+            );
+            assert_eq!(
+                text.matches(&format!("AcDbEntity\n  8\n{layer}\n")).count(),
+                1,
+                "{layer}"
+            );
+        }
+        assert_eq!(text.matches("AcDbEntity\n  8\n0\n").count(), 1);
+        assert_eq!(nearest_aci([1.0, 1.0, 1.0, 1.0]), 7);
+        assert_eq!(nearest_aci([0.9, 0.1, 0.1, 1.0]), 1);
     }
 }

@@ -273,10 +273,10 @@ pub fn write_layers(layers: &[crate::Layer<'_>], style: &SvgStyle) -> Vec<u8> {
     let mut out = header(layers.iter().flat_map(|l| l.outlines.iter()), style);
     for l in layers {
         match l.name {
-            None => push_path(&mut out, l.outlines, style, l.color),
+            None => push_path(&mut out, l.outlines, style, l.paint()),
             Some(name) => {
                 out.push_str(&format!("<g id=\"{}\">\n", xml_attr(name)));
-                push_path(&mut out, l.outlines, style, l.color);
+                push_path(&mut out, l.outlines, style, l.paint());
                 out.push_str("</g>\n");
             }
         }
@@ -285,7 +285,12 @@ pub fn write_layers(layers: &[crate::Layer<'_>], style: &SvgStyle) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// `s` escaped for a double-quoted XML attribute.
+/// `s` escaped for a double-quoted XML attribute. Tab, newline and
+/// carriage return become character references, which a reader keeps
+/// (written raw, attribute normalisation would turn them into spaces);
+/// the other control characters, and U+FFFE and U+FFFF, are left out,
+/// since XML 1.0 cannot hold them at all and one would make the file
+/// unreadable.
 fn xml_attr(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
@@ -294,6 +299,8 @@ fn xml_attr(s: &str) -> String {
             '<' => o.push_str("&lt;"),
             '>' => o.push_str("&gt;"),
             '"' => o.push_str("&quot;"),
+            '\t' | '\n' | '\r' => o.push_str(&format!("&#{};", u32::from(c))),
+            '\u{0}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}' => {}
             _ => o.push(c),
         }
     }
@@ -504,5 +511,22 @@ mod tests {
         let (shapes, msgs) = read_str(&svg, &opts);
         assert!(msgs.is_empty(), "{msgs:?}");
         assert_eq!(shapes.len(), 1);
+    }
+
+    #[test]
+    fn group_ids_stay_valid_xml() {
+        assert_eq!(xml_attr("a\tb\nc\rd"), "a&#9;b&#10;c&#13;d");
+        assert_eq!(xml_attr("a\u{1}b\u{1f}c\u{ffff}"), "abc");
+        assert_eq!(xml_attr("<&>\""), "&lt;&amp;&gt;&quot;");
+        // A "no colour" layer is painted in the style's colours.
+        let sq = [Outline::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])];
+        let layers = [crate::Layer {
+            name: Some("u"),
+            color: Some([-1.0; 4]),
+            outlines: &sq,
+        }];
+        let svg = String::from_utf8(write_layers(&layers, &SvgStyle::default())).unwrap();
+        assert!(svg.contains("stroke=\"black\""), "{svg}");
+        assert!(!svg.contains("opacity"), "{svg}");
     }
 }

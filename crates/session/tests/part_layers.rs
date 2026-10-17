@@ -156,3 +156,88 @@ fn without_parts_or_the_extension_the_file_is_unchanged() {
     assert!(!plain.contains("<g "));
     assert_eq!(plain.matches("<path").count(), 1);
 }
+
+/// The `<path>` elements of `svg` outside every group, and inside
+/// `<g id="ID">` for each id, in order.
+fn groups(svg: &str) -> (String, Vec<(String, String)>) {
+    let mut parts = svg.split("<g id=\"");
+    let rest = parts.next().unwrap().to_string();
+    let groups = parts
+        .map(|g| {
+            let (id, body) = g.split_once("\">\n").unwrap();
+            (
+                id.to_string(),
+                body.split("</g>").next().unwrap().to_string(),
+            )
+        })
+        .collect();
+    (rest, groups)
+}
+
+#[test]
+fn minkowski_and_hull_keep_their_unparted_children_in_each_part() {
+    let s = session(&[
+        (
+            "m.scad",
+            "minkowski() { part(\"p\") square(10); circle(1, $fn = 8); }",
+        ),
+        (
+            "h.scad",
+            "hull() { part(\"a\") square(2); translate([20, 0]) square(2); }",
+        ),
+        (
+            "r.scad",
+            "resize([40, 0], auto = true) { part(\"a\") square(2); translate([8, 0]) square(2); }",
+        ),
+    ]);
+    // p is the rounded square, with no stray octagon of its own.
+    let (rest, g) = groups(&export(&s, "m.scad", "svg", true));
+    assert!(!rest.contains("<path"), "{rest}");
+    assert_eq!(g.len(), 1);
+    assert_eq!(g[0].0, "p");
+    assert_eq!(g[0].1.matches(" z\n").count(), 1);
+    assert!(g[0].1.matches(" L ").count() > 4, "{}", g[0].1);
+    // The hull of a with the square beside it reaches x = 22.
+    let (rest, g) = groups(&export(&s, "h.scad", "svg", true));
+    assert!(!rest.contains("<path"), "{rest}");
+    assert_eq!(g.len(), 1);
+    assert!(g[0].1.contains(" 22,-"), "{}", g[0].1);
+    // Resized by the size of both, not of a alone.
+    let (rest, g) = groups(&export(&s, "r.scad", "svg", true));
+    assert!(!rest.contains("<path"), "{rest}");
+    assert_eq!(g.len(), 1);
+    assert!(g[0].1.contains(" 8,-8"), "{}", g[0].1);
+
+    let dxf = export(&s, "m.scad", "dxf", true);
+    assert!(!dxf.contains("AcDbEntity\n  8\n0\n"), "{dxf}");
+}
+
+#[test]
+fn a_background_child_owns_nothing() {
+    let src = r#"part("a") translate([30, 0]) square(3);
+difference() { %square(50); square(10); circle(2, $fn = 4); }"#;
+    let s = session(&[("b.scad", src)]);
+    let (rest, g) = groups(&export(&s, "b.scad", "svg", true));
+    assert_eq!(g.len(), 1);
+    assert_eq!(g[0].0, "a");
+    assert_eq!(g[0].1.matches(" z\n").count(), 1, "{}", g[0].1);
+    // The cut square is outside every part, its corner cut away.
+    assert!(rest.contains("L 0,-2 L 2,-0"), "{rest}");
+}
+
+#[test]
+fn an_undefined_colour_is_no_colour() {
+    let src = r#"part("u") color(undef) square(3);
+color("red") part("v") color(undef) translate([5, 0]) square(3);"#;
+    let s = session(&[("c.scad", src)]);
+    let svg = export(&s, "c.scad", "svg", true);
+    assert!(!svg.contains("opacity"), "{svg}");
+    let (_, g) = groups(&svg);
+    assert_eq!(g.len(), 2);
+    // u keeps the style's stroke; v the colour around it.
+    assert!(g[0].1.contains("stroke=\"black\""), "{}", g[0].1);
+    assert!(g[1].1.contains("stroke=\"#ff0000\""), "{}", g[1].1);
+    let dxf = export(&s, "c.scad", "dxf", true);
+    assert!(dxf.contains("  2\nu\n 70\n64\n 62\n7\n"), "{dxf}");
+    assert!(dxf.contains("  2\nv\n 70\n64\n 62\n1\n"), "{dxf}");
+}

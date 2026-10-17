@@ -507,11 +507,16 @@ for (i = [0:3])
 - **DXF:** each part's entities on a layer named after it (characters a
   DXF layer name cannot hold, `<>/\":;?*|=,` and the backquote, become
   `_`), listed in the LAYER table with the AutoCAD colour index nearest
-  its `color()` (7 without one); the rest on layer `0`.
+  its `color()` (7 without one); the rest on layer `0`. Parts whose
+  layer names would be the same (`p/q` and `p:q`, or a part named `0`,
+  compared without case as AutoCAD does) stay apart: each later one
+  takes the first free suffix, `p_q_2`, `p_q_3`, `0_2`, in order of
+  first appearance.
   `import("wall.dxf", layer = "stud2")` reads one part back.
 - **Which colour:** the innermost `color()` around the `part()` call, or
   one directly inside it around all its children
-  (`part("x") color("red") ...`).
+  (`part("x") color("red") ...`). A `color()` of an undefined or unknown
+  colour is no colour: the part keeps the one around it, if any.
 - **Nested parts** are layers of their own (`wall.stud`); the outer part
   has what is in it outside them.
 - **What a part draws** is its own geometry as it reaches the model: the
@@ -522,7 +527,10 @@ for (i = [0:3])
   `offset()` and the other 2D operations stay apart, so a 3D model drawn
   through `projection()` exports one outline per member. A `hull()`,
   `minkowski()` or `resize()` over several parts is applied to each part
-  on its own, within the model's outline. Outlines of overlapping parts
+  on its own, within the model's outline; its children outside every part
+  go whole into each part's layer and have none of their own, so
+  `minkowski() { part("p") square(10); circle(1); }` draws p rounded.
+  `%` children are never part of a layer. Outlines of overlapping parts
   overlap.
 - **Unchanged otherwise:** without the extension, for a model without
   parts, and for every other format (PDF included), the file is
