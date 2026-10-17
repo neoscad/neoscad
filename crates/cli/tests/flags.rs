@@ -510,3 +510,36 @@ fn step_export_needs_the_exact_extension() {
     assert!(!d.join("bad.step").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn quiet_echo_export_keeps_only_errors_as_the_nightly_does() {
+    let d = scratch("quiet-echo");
+    std::fs::write(
+        d.join("e.scad"),
+        "echo(\"hi\", 1);\nx = undef + 1;\ncube(1);\n",
+    )
+    .unwrap();
+    std::fs::write(d.join("err.scad"), "echo(1);\nassert(false);\n").unwrap();
+    // An echo export prints nothing on the console, so `-q` is not needed
+    // to keep a terminal quiet.
+    let out = neoscad(&d, &["-o", "e.echo", "e.scad"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(
+        std::fs::read_to_string(d.join("e.echo")).unwrap(),
+        "WARNING: undefined operation (undefined + number) in file e.scad, line 2\nECHO: \"hi\", 1\n"
+    );
+    // `-q` filters the echo file as it filters the console, as OpenSCAD's
+    // does (its `echo_issue4172-echo-vector-stack-exhaust` test, run with
+    // `--quiet`, expects only the error): the nightly writes an empty file
+    // here, and only the error for `err.scad`.
+    let out = neoscad(&d, &["-q", "-o", "q.echo", "e.scad"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(std::fs::read_to_string(d.join("q.echo")).unwrap(), "");
+    neoscad(&d, &["-q", "-o", "qe.echo", "err.scad"]);
+    assert_eq!(
+        std::fs::read_to_string(d.join("qe.echo")).unwrap(),
+        "ERROR: Assertion 'false' failed in file err.scad, line 2\n"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

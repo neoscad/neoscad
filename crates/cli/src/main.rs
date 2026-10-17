@@ -271,7 +271,9 @@ struct Cli {
     #[arg(short = 'm', value_name = "MAKE_CMD")]
     make_command: Option<String>,
 
-    /// Quiet mode: print nothing except errors.
+    /// Quiet mode: print nothing except errors. As in OpenSCAD this also
+    /// filters `-o x.echo` (an echo export prints nothing on the console
+    /// anyway).
     #[arg(short = 'q', long)]
     quiet: bool,
 
