@@ -1743,11 +1743,11 @@ queries"), done after stage 7:
   and `polyline_is_the_hand_written_profile`
   (`crates/session/tests/sketch.rs`); user docs in `docs/sketch.md`.
 - **`$neoscad_features`** (`Evaluator::run`, `eval::NEOSCAD_FEATURES`).
-  Asked for by a library (FramingSCAD) that uses sketches under
-  NeoSCAD and `polygon()` in OpenSCAD and made its users set a flag by
-  hand: `version()` is the nightly's, and the sketch vocabulary is
-  invisible outside sketch bodies, so nothing told the two apart. A `$`
-  variable rather than a function such as `feature("sketch")`, because
+  Asked for by a library that uses the extensions under NeoSCAD and
+  falls back in OpenSCAD (sketches in one, `polygon()` in the other),
+  and made its users set a flag by hand: `version()` is the nightly's,
+  and the sketch vocabulary is invisible outside sketch bodies, so
+  nothing told the two apart. A `$` variable rather than a function such as `feature("sketch")`, because
   an unknown variable read by `is_undef()` is silent in OpenSCAD while
   an unknown function call warns. It is a list of `--enable` names in
   `Extension::ALL` order, bound in the builtin context only when at

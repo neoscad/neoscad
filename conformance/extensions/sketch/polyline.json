@@ -333,7 +333,7 @@
       }
     ],
     "line": 64,
-    "message": "Sketch 'statement': polyline(P): in a sketch body, polyline() makes an entity and must be assigned",
+    "message": "Sketch 'statement': polyline(P): in a sketch body, polyline() makes lines and must be assigned",
     "severity": "error",
     "span": {
       "end": {
@@ -345,6 +345,6 @@
         "line": 64
       }
     },
-    "text": "ERROR: Sketch 'statement': polyline(P): in a sketch body, polyline() makes an entity and must be assigned in file polyline.scad, line 64"
+    "text": "ERROR: Sketch 'statement': polyline(P): in a sketch body, polyline() makes lines and must be assigned in file polyline.scad, line 64"
   }
 ]

@@ -962,3 +962,23 @@ translate([0, 0]) sketch(name = \"built\", strict = true) { e = polyline(P, cons
         "{csg}"
     );
 }
+
+/// A closed polyline whose last point repeats its first, as a list pasted
+/// from a `polygon()` often does, would close the loop with an edge of no
+/// length: it is refused, naming the two points, rather than handed to the
+/// solver as corners that disagree. A point with a non-finite coordinate
+/// (here a division by zero) is named by its index, not reported as a list
+/// of the wrong shape.
+#[test]
+fn polyline_names_a_repeated_closing_point_and_a_non_finite_one() {
+    let text = b"sketch(name = \"pasted\") { e = polyline([[0, 0], [10, 0], [10, 5], [0, 0]]); }\n\
+sketch(name = \"inf\") { e = polyline([[0, 0], [1 / 0, 0], [1, 1]]); }\n";
+    let (s, _) = session(&[("m.scad", text)]);
+    let (log, _) = evaluate(&s, "m.scad", true);
+    assert_eq!(
+        log,
+        "ERROR: Sketch 'pasted': polyline(): points[3] and points[0] are both [0, 0], so the line between them (edge 3) would have zero length in file m.scad, line 1\n\
+ERROR: Sketch 'inf': polyline(): points[1] is [inf, 0], which is not finite: every coordinate must be a finite number in file m.scad, line 2\n",
+        "{log}"
+    );
+}

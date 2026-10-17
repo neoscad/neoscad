@@ -7,4 +7,4 @@ ERROR: Sketch 'repeat': polyline(): points[1] and points[2] are both [10, 0], so
 ERROR: Sketch 'zero': length(e[1], 0): a length of 0 makes line 'e[1]' a point: its ends 'q[1]' and 'q[2]' would be the same in file polyline.scad, line 58
 ERROR: Sketch 'short': polyline(): points must be a list of at least 3 [x, y] points for a closed polyline, found [[0, 0], [1, 0]] in file polyline.scad, line 62
 ERROR: Sketch 'mode': polyline(): constrain must be "none", "edges" or "fixed", found "all" in file polyline.scad, line 63
-ERROR: Sketch 'statement': polyline(P): in a sketch body, polyline() makes an entity and must be assigned in file polyline.scad, line 64
+ERROR: Sketch 'statement': polyline(P): in a sketch body, polyline() makes lines and must be assigned in file polyline.scad, line 64

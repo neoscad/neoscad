@@ -860,11 +860,20 @@ fn mul(a: &Matrix, b: &Matrix) -> Matrix {
 /// warning).
 fn own_matrix(n: &Node) -> Option<Matrix> {
     match &n.kind {
-        NodeKind::Transform { matrix, .. } => matrix
-            .iter()
-            .flatten()
-            .all(|v| v.is_finite())
-            .then_some(*matrix),
+        // Only the top three rows place anything: the geometry applies
+        // each transform on its own as an affine map (`geom::polyset::apply`),
+        // as OpenSCAD's `Affine3d` does, so a `multmatrix` bottom row other
+        // than [0, 0, 0, 1] moves nothing. Composing the raw rows instead
+        // would let that row leak into the parents' translations, putting
+        // anchors where the geometry is not. The finiteness check still
+        // looks at all sixteen, as the geometry's does.
+        NodeKind::Transform { matrix, .. } => {
+            matrix.iter().flatten().all(|v| v.is_finite()).then(|| {
+                let mut m = *matrix;
+                m[3] = [0.0, 0.0, 0.0, 1.0];
+                m
+            })
+        }
         // The profile's plane is the extrusion's base: z = 0, or with
         // `center` the height vector's half below it (`geom::extrude`).
         NodeKind::LinearExtrude(e) if e.center => {

@@ -923,9 +923,14 @@ impl<'a> Evaluator<'a> {
                 severity: Severity::Error,
                 code: DiagCode::SketchGeometryInBody,
                 loc,
-                text: format!(
-                    "{text}: in a sketch body, {name}() makes an entity and must be assigned"
-                ),
+                // polyline() is the one constructor that makes lines (a
+                // list of them) rather than one entity; saying "an entity"
+                // would contradict the hint below, which indexes the lines.
+                text: if name == "polyline" {
+                    format!("{text}: in a sketch body, polyline() makes lines and must be assigned")
+                } else {
+                    format!("{text}: in a sketch body, {name}() makes an entity and must be assigned")
+                },
                 hints: say(if name == "polyline" {
                     "inside a sketch, write `e = polyline(points);`: its lines, `e[i]`, are handles for more constraints".to_string()
                 } else {
@@ -1611,6 +1616,30 @@ fn polyline_in(
         .as_vector()
         .and_then(|v| v.as_slice().iter().map(|p| p.as_vec2(true)).collect());
     let least = if closed { 3 } else { 2 };
+    // A point with an infinite or NaN coordinate is otherwise refused as
+    // "not a list of [x, y] points", which sends the reader looking at the
+    // list's shape when the fault is one number (often a division by zero
+    // upstream): name the point instead.
+    if pts.is_none()
+        && let Some(v) = vals[0].as_vector()
+        && let Some((i, p)) = v
+            .as_slice()
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.as_vec2(false).is_some() && p.as_vec2(true).is_none())
+    {
+        let mut found = Vec::new();
+        ev.write_echo_nothrow(p, &mut found);
+        notes.push(error(
+            DiagCode::InvalidArgument,
+            format!(
+                "points[{i}] is {}, which is not finite: every coordinate must be a finite number",
+                String::from_utf8_lossy(&found)
+            ),
+            None,
+        ));
+        return None;
+    }
     let pts = match pts {
         Some(p) if p.len() >= least => p,
         _ => {

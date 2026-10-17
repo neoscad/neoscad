@@ -689,6 +689,29 @@ fn world_coordinates_follow_every_enclosing_transform() {
     assert_eq!((out.csg, out.key), (plain.csg, plain.key));
 }
 
+/// A `multmatrix()` bottom row other than [0, 0, 0, 1] moves nothing: the
+/// geometry applies each transform as an affine map, as OpenSCAD's
+/// `Affine3d` does, so the cube corner at [0, 0, 1] renders at [10, 0, 1].
+/// Composing the raw rows put it at [20, 0, 1], the row's z leaking into
+/// the parent's x translation, in `to_world()` and `child_anchors()` alike.
+#[test]
+fn world_coordinates_ignore_a_multmatrix_bottom_row() {
+    let text = "module top() { a = child_anchors(0); echo(anchored = a.corner[0]); children(0); }\n\
+                top() translate([10, 0, 0]) multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 1, 1]]) {\n\
+                  echo(corner = to_world([0, 0, 1]), m = world_transform());\n\
+                  anchor(\"corner\", [0, 0, 1]);\n\
+                  cube(1);\n\
+                }\n";
+    let out = evaluate(text, &opts(true));
+    assert_eq!(
+        out.lines,
+        [
+            "ECHO: anchored = [10, 0, 1] @0",
+            "ECHO: corner = [10, 0, 1], m = [[1, 0, 0, 10], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]] @0",
+        ]
+    );
+}
+
 /// A module called at several places, with the call memo on, reports each
 /// place: a call that read its transform is never replayed. A query's
 /// instance of a child that read it is not reused by a `children()` under
