@@ -2276,6 +2276,8 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "scad-deps"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5c5c9955d62d956d42a8d744aa802836a425d03fb81707a23eb1855191381a8"
 dependencies = [
  "basic-toml",
  "clap",

@@ -7,7 +7,7 @@
 #
 # The binary embeds the Liberation fonts (SIL OFL 1.1) and MCAD (LGPL 2.1),
 # and links patched copies of manifold-rust (Apache 2.0) and clipper2-rust
-# (Boost 1.0), and scad-deps (crates/project, MIT); NOTICE covers the
+# (Boost 1.0), and scad-deps (from crates.io, MIT); NOTICE covers the
 # libtess2 port. Their licences require the
 # notices to travel with the binary, and a release that shipped only
 # LICENSE (as scripts/apple/release.sh once did) did not meet them.
@@ -21,12 +21,14 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 
 # Each copy and its source, relative to the repository root.
+# packaging/licenses/scad-deps-MIT.txt has no source in this tree (the
+# crate comes from crates.io): it is the LICENSE of the release Cargo.lock
+# names, and goes with the lockfile when that changes.
 pairs=(
     "packaging/licenses/Liberation-Fonts-OFL-1.1.txt assets/fonts/Liberation-2.00.1/LICENSE"
     "packaging/licenses/MCAD-LGPL-2.1.txt assets/libraries/MCAD/lgpl-2.1.txt"
     "packaging/licenses/manifold-rust-Apache-2.0.txt vendor/manifold-rust/LICENSE"
     "packaging/licenses/clipper2-rust-BSL-1.0.txt vendor/clipper2-rust/LICENSE"
-    "packaging/licenses/scad-deps-MIT.txt crates/project/LICENSE"
 )
 
 case "${1:-}" in

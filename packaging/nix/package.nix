@@ -68,8 +68,6 @@ rustPlatform.buildRustPackage (finalAttrs: {
     "neoscad-assets"
     "--package"
     "neoscad-render"
-    "--package"
-    "scad-deps"
   ];
 
   checkFlags = lib.optionals stdenv.hostPlatform.isDarwin [
@@ -81,9 +79,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   nativeBuildInputs = [ installShellFiles ];
 
-  # The dependency manager's tests (scad-deps' own, and neoscad-cli's
-  # tests/dependencies.rs) build local git repositories and fetch them
-  # with the system git, as `neoscad fetch` does.
+  # The dependency manager's tests (neoscad-cli's tests/dependencies.rs)
+  # build local git repositories and fetch them with the system git, as
+  # `neoscad fetch` does.
   nativeCheckInputs = [ git ];
 
   # The man page and completions come from the binary itself (`neoscad

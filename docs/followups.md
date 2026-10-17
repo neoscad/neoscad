@@ -3022,14 +3022,11 @@ From the dependency manager (`docs/dependencies.md`, issue #1).
   path's time; a per-checkout stamp (size and mtime of every file) would
   make it near free.
 - Submodules and git LFS objects of a dependency are not checked out.
-- scad-deps is meant to move to its own repository (as sketch-solver
-  did), with NeoSCAD depending on it from crates.io; `crates/project` is
-  self-contained for that (its own version, licence, lints and tests).
 - On Windows a fetch makes a directory symbolic link, else a copy (no
-  junction: see `docs/dependencies.md`, "Links"). The `windows` job in
-  `ci.yml` runs scad-deps' tests (`cargo test -p neoscad-cli -p
-  neoscad-lang -p scad-deps`), which take whichever of the two the
-  runner allows; the other one is not exercised there. A junction made
+  junction: see `docs/dependencies.md`, "Links"). scad-deps' own CI
+  (neoscad/scad-deps) and the `windows` job in `ci.yml` (neoscad-cli's
+  tests/dependencies.rs) run its tests on Windows, which take whichever
+  of the two the runner allows; the other one is not exercised. A junction made
   through `DeviceIoControl` (no `cmd`) would save Windows users without
   Developer Mode a copy per project.
 - The session's parse cache does not notice a new file that would shadow

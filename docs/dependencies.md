@@ -10,17 +10,17 @@ project after `neoscad vendor`.
 
 This is option A of the proposal in issue #1 (manifest, lockfile and a
 managed search path), with option B (project search-path entries) as the
-manifest's `[paths]` table. The code is the `scad-deps` crate
-(`crates/project`, a host crate), which is published on crates.io on its
-own so that stock-OpenSCAD users and other tools share the same files
-and store: its standalone `scad-deps` binary (`cargo install scad-deps
+manifest's `[paths]` table. The code is the `scad-deps` crate, in its own
+repository ([neoscad/scad-deps](https://github.com/neoscad/scad-deps))
+and published on crates.io, which NeoSCAD's hosts depend on, so that
+stock-OpenSCAD users and other tools share the same files and store: its standalone `scad-deps` binary (`cargo install scad-deps
 --features cli`) has the same commands as `neoscad`, which runs
 `scad_deps::cli` under its own name (`crates/cli/src/pkg.rs`). Unlike
 the rest of NeoSCAD (GPL-2.0-or-later), the crate is MIT-licensed, so it
 can be used by tools under any licence.
 
 **The formats are specified in the crate's README,
-[`crates/project/README.md`](../crates/project/README.md)**: the
+[neoscad/scad-deps/README.md](https://github.com/neoscad/scad-deps/blob/main/README.md)**: the
 manifest's fields, the lockfile's fields, order and bytes, the `inputs`
 and content hashes, the search order, the store's layout, the links and
 the resolution policy. This page is NeoSCAD's user guide and the design
