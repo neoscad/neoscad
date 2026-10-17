@@ -29,6 +29,24 @@ impl Drop for Scratch {
     }
 }
 
+/// `std::fs::canonicalize` without Windows' `\\?\` prefix on a drive
+/// path, as the store and projects spell theirs: git cannot open paths
+/// under a verbatim prefix, and a `file://` URL made from one is not one
+/// git reads.
+fn canon(p: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let c = std::fs::canonicalize(p).unwrap();
+    #[cfg(windows)]
+    {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            return std::path::PathBuf::from(rest.to_string());
+        }
+    }
+    c
+}
+
 fn scratch(name: &str) -> Scratch {
     let d = std::env::temp_dir().join(format!("scad-deps-{}-{name}", std::process::id()));
     if d.exists() {
@@ -36,7 +54,7 @@ fn scratch(name: &str) -> Scratch {
         let _ = std::fs::remove_dir_all(&d);
     }
     std::fs::create_dir_all(&d).unwrap();
-    Scratch(d.canonicalize().unwrap())
+    Scratch(canon(&d))
 }
 
 /// Undo the store's read-only checkouts, so a test can clean up.
@@ -252,7 +270,7 @@ fn add_fetches_locks_and_links() {
     let link = app.join(".scad/libraries/Lib");
     let target = std::fs::read_link(&link).unwrap();
     assert!(
-        target.starts_with(env.store.canonicalize().unwrap().join("checkouts")),
+        target.starts_with(canon(&env.store).join("checkouts")),
         "{}",
         target.display()
     );
@@ -316,8 +334,8 @@ fn two_projects_share_one_checkout() {
         (Some(0), Some(0), Some(0)),
         "{second}"
     );
-    let ra = std::fs::canonicalize(a.join(".scad/libraries/Lib")).unwrap();
-    let rb = std::fs::canonicalize(b.join(".scad/libraries/Lib")).unwrap();
+    let ra = canon(a.join(".scad/libraries/Lib"));
+    let rb = canon(b.join(".scad/libraries/Lib"));
     assert_eq!(ra, rb);
     #[cfg(unix)]
     {
@@ -439,7 +457,7 @@ fn a_modified_checkout_fails_the_hash() {
     let u = repo(&base.join("lib"), &[("x.scad", &lib_v("v1"))], "v1.0.0");
     let app = project(&base, "app");
     env.ok(&app, &["add", "Lib", "--git", &u, "--tag", "v1.0.0"]);
-    let target = std::fs::canonicalize(app.join(".scad/libraries/Lib")).unwrap();
+    let target = canon(app.join(".scad/libraries/Lib"));
     writable(&target);
     std::fs::write(target.join("x.scad"), lib_v("evil")).unwrap();
     let o = env.run(&app, &["fetch"]);
@@ -548,7 +566,7 @@ fn path_dependencies_and_project_paths() {
     let app = project(&base, "app");
     env.ok(&app, &["add", "Lib", "--path", "../shared"]);
     let link = app.join(".scad/libraries/Lib");
-    assert_eq!(std::fs::canonicalize(&link).unwrap(), shared);
+    assert_eq!(canon(&link), shared);
     // Linked, not copied: edits show through.
     std::fs::write(shared.join("x.scad"), lib_v("edited")).unwrap();
     assert_eq!(linked(&app), lib_v("edited"));
@@ -595,7 +613,7 @@ fn vendor_writes_a_plain_folder() {
     assert_eq!(std::fs::read_to_string(f).unwrap(), lib_v("v1"));
     // Into another folder, as JSON.
     let v = env.json(&app, &["vendor", "out"]);
-    let out = app.join("out").canonicalize().unwrap();
+    let out = canon(app.join("out"));
     assert_eq!(v["dir"], out.to_string_lossy().as_ref(), "{v}");
     assert_eq!(v["folders"], serde_json::json!(["Lib"]), "{v}");
     assert_eq!(
@@ -764,7 +782,7 @@ fn concurrent_fetches_share_the_store() {
     assert_eq!((cloned, checked_out), (1, 1));
     let targets: std::collections::BTreeSet<PathBuf> = projects
         .iter()
-        .map(|p| std::fs::canonicalize(p.join(".scad/libraries/Lib")).unwrap())
+        .map(|p| canon(p.join(".scad/libraries/Lib")))
         .collect();
     assert_eq!(targets.len(), 1);
     for p in &projects {
@@ -1232,7 +1250,7 @@ fn a_new_lock_does_not_trust_the_store() {
     let env = Env::new(&base);
     let (app, _) = locked_project(&base, &env);
     let good = std::fs::read_to_string(app.join("scad.lock")).unwrap();
-    let target = std::fs::canonicalize(app.join(".scad/libraries/Lib")).unwrap();
+    let target = canon(app.join(".scad/libraries/Lib"));
     writable(&target);
     std::fs::write(target.join("x.scad"), lib_v("evil")).unwrap();
     std::fs::remove_file(app.join("scad.lock")).unwrap();

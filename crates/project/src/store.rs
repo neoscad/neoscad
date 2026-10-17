@@ -103,8 +103,9 @@ impl Store {
             std::fs::write(&empty, b"").at("write", &empty)?;
         }
         // Canonical, so links and the index name the store the same way
-        // whatever spelling found it.
-        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        // whatever spelling found it; without Windows' `\\?\` prefix,
+        // which git cannot open paths under ([`crate::search::canonicalize`]).
+        let root = crate::search::canonicalize(&root).unwrap_or(root);
         Ok(Store {
             git: Git::new(root.join("empty-gitconfig")),
             root,

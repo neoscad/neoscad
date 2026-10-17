@@ -31,6 +31,24 @@ impl Drop for Scratch {
     }
 }
 
+/// `std::fs::canonicalize` without Windows' `\\?\` prefix on a drive
+/// path, as the store and projects spell theirs: git cannot open paths
+/// under a verbatim prefix, and a `file://` URL made from one is not one
+/// git reads.
+fn canon(p: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    let c = std::fs::canonicalize(p).unwrap();
+    #[cfg(windows)]
+    {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            return std::path::PathBuf::from(rest.to_string());
+        }
+    }
+    c
+}
+
 fn scratch(name: &str) -> Scratch {
     let d = std::env::temp_dir().join(format!("nsc-deps-{}-{name}", std::process::id()));
     if d.exists() {
@@ -38,7 +56,7 @@ fn scratch(name: &str) -> Scratch {
         let _ = std::fs::remove_dir_all(&d);
     }
     std::fs::create_dir_all(&d).unwrap();
-    Scratch(d.canonicalize().unwrap())
+    Scratch(canon(&d))
 }
 
 /// Undo the store's read-only checkouts, so a test can clean up.
@@ -375,7 +393,7 @@ fn path_dependencies_and_project_paths() {
     let app = project(&base, "app", MAIN);
     env.ok(&app, &["add", "Lib", "--path", "../shared"]);
     let link = app.join(".scad/libraries/Lib");
-    assert_eq!(std::fs::canonicalize(&link).unwrap(), shared);
+    assert_eq!(canon(&link), shared);
     assert_eq!(echo(&env, &app, "main.scad", &[]), "ECHO: \"shared\"\n");
     // Edits show through: a path dependency is linked, not copied.
     std::fs::write(shared.join("x.scad"), lib_v("edited")).unwrap();
