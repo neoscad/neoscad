@@ -91,7 +91,12 @@ jobs:
           persist-credentials: false
       # target/: the core (aarch64-apple-darwin, release) and the CLI the
       # app carries share their dependencies' builds.
+      # Saved from main only: a pull request restores main's cache, but
+      # what it would save only that pull request can use, and at ~0.5 GB
+      # a job those pushed main's own past the repository's 10 GB and out.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
