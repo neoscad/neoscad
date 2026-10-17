@@ -78,7 +78,22 @@ fn writable(p: &Path) {
         }
     }
     #[cfg(not(unix))]
-    let _ = p;
+    if let Ok(m) = std::fs::symlink_metadata(p) {
+        // Windows: the read-only attribute, which refuses writes (and the
+        // removal of a read-only file) until it is cleared.
+        if m.file_type().is_symlink() {
+            return;
+        }
+        let mut perm = m.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perm.set_readonly(false);
+        let _ = std::fs::set_permissions(p, perm);
+        if m.is_dir() {
+            for e in std::fs::read_dir(p).unwrap().flatten() {
+                writable(&e.path());
+            }
+        }
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
