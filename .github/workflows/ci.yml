@@ -6,7 +6,8 @@
 #   (scripts/vendor-check.sh), the release config;
 # - test: clippy, cargo test and the conformance suite on macOS arm64,
 #   Linux x86_64 and Linux aarch64 (output depends on the architecture and
-#   the platform's libm, so each is its own output path);
+#   the platform's libm, so each is its own output path), and on Linux
+#   x86_64 the editor grammar's tests and corpus;
 # - windows: the CLI builds and its tests pass (x86_64), and serves over a
 #   named pipe;
 # - linux-app: the GTK desktop app builds, its tests pass, and it runs
@@ -14,6 +15,9 @@
 # - wasm: scripts/wasm-check.sh;
 # - web: the web demo's unit tests, and its e2e suite against the mock
 #   build in Chromium, Firefox and WebKit.
+#
+# The macOS app's Swift build and tests are macos-app.yml, which runs
+# when the app or what it is built from changes.
 name: CI
 
 on:
@@ -129,6 +133,25 @@ jobs:
 
       - run: cargo build --locked --release -p neoscad-cli -p neoscad-conformance
       - run: target/release/conformance manifest --check
+
+      # The editor's grammar (apple/Editor/web, shared by the macOS app,
+      # the Linux app and the web demo): its unit tests, then the corpus,
+      # which parses every file of the reference checkout that the release
+      # CLI's parser accepts and fails on any error node, so a change to
+      # either parser that the other doesn't follow fails here. Once, on
+      # one platform: the grammar is JavaScript and the parser's verdicts
+      # don't depend on the architecture.
+      - uses: actions/setup-node@v7
+        if: matrix.name == 'Linux x86_64'
+        with:
+          node-version: 22
+      - name: Editor grammar
+        if: matrix.name == 'Linux x86_64'
+        working-directory: apple/Editor/web
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run corpus
 
       - name: Conformance
         run: |

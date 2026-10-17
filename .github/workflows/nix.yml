@@ -1,26 +1,59 @@
 # Builds the Nix package (flake.nix, through packaging/nix/package.nix,
 # the file submitted to nixpkgs) with its tests, on Linux x86_64 and
-# macOS arm64, then runs it and exports a model. Runs on a push
-# (to any branch) that changes the packaging or the dependency set, and by
-# hand; ci.yml covers the code itself.
+# macOS arm64, then runs it and exports a model; and by hand. ci.yml
+# covers the code itself.
+#
+# The package is built from a fileset (packaging/nix/local.nix), not the
+# whole tree, so a test or build script that starts reading a file outside
+# it (a doc page, a conformance case) passes ci.yml and fails here. A pull
+# request therefore runs it when the packaging or the dependency set
+# changes, or when what reads files does: the crates' integration tests,
+# their build scripts and manifests, and the fileset's single files (a
+# rename drops them from the package). It runs on Linux alone there, since
+# the fileset is the same on every platform; a push to main runs both.
+# To try packaging work on a branch before its pull request, run it by
+# hand (`gh workflow run nix.yml --ref <branch>`).
 name: Nix
 
 on:
   workflow_dispatch:
-  push:
+  pull_request:
     paths:
       - flake.nix
       - flake.lock
       - packaging/nix/**
       - Cargo.toml
       - Cargo.lock
+      - crates/*/Cargo.toml
+      - crates/*/build.rs
+      - crates/*/tests/**
+      - docs/fillet-edges.md
+      - docs/geometry-queries.md
+      - docs/sketch.md
+      - .github/workflows/nix.yml
+  push:
+    branches: [main]
+    paths:
+      - flake.nix
+      - flake.lock
+      - packaging/nix/**
+      - Cargo.toml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+      - crates/*/build.rs
+      - crates/*/tests/**
+      - docs/fillet-edges.md
+      - docs/geometry-queries.md
+      - docs/sketch.md
       - .github/workflows/nix.yml
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its superseded run; on main each
+# commit is its own group, so nothing there is cancelled.
 concurrency:
-  group: nix-${{ github.ref }}
+  group: nix-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -29,11 +62,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux x86_64
-            runner: ubuntu-22.04
-          - name: macOS arm64
-            runner: macos-15
+        include: ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"name":"Linux x86_64","runner":"ubuntu-22.04"}]'
+          || '[{"name":"Linux x86_64","runner":"ubuntu-22.04"},{"name":"macOS arm64","runner":"macos-15"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:

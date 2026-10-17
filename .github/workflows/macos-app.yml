@@ -1,0 +1,140 @@
+# The macOS app (apple/, docs/release.md): the Rust core, the editor
+# bundle, the Xcode project, and `xcodebuild test` (NeoSCADTests, the
+# core through its Swift bindings, and NeoSCADAppTests, hosted in the
+# app). ci.yml builds and tests neoscad-ffi as Rust only, so without this
+# a change to the bindings' interface, the Swift code or project.yml went
+# uncompiled until a release built the app (publish-macos-app.yml).
+#
+# Runs on a pull request or a push to main that changes the app, the
+# crates it is built from directly (the core, the app core, the agent
+# link), the examples the core embeds, the dependency set (a uniffi
+# update changes the bindings) or its scripts; and by hand. A change to
+# the modelling crates alone reaches the app through neoscad-ffi's Rust
+# interface, which ci.yml's macOS test job compiles and tests.
+#
+# The editor grammar's tests (apple/Editor/web: npm test, npm run corpus)
+# are in ci.yml's Linux x86_64 test job instead: the corpus checks the
+# grammar against crates/lang's parser, so a parser change must run them
+# too, and that job already has the release CLI and the reference
+# checkout they need.
+#
+# Unsigned in the sense that matters: project.yml signs ad hoc
+# (CODE_SIGN_IDENTITY "-", no team), as every local build does, and
+# needs no certificate. CODE_SIGNING_ALLOWED=NO is not used: the app and
+# its extensions are sandboxed through their entitlements, which only a
+# signature carries, and `xcodebuild test` re-signs the embedded
+# extensions for testing.
+#
+# If a test turns out to need what a hosted runner lacks (a logged-in
+# GUI session, a real GPU), skip that one test by name with
+# `-skip-testing:NeoSCADAppTests/<Suite>/<test>()` on the xcodebuild line
+# below, with a comment naming what it needs; keep the rest of the target.
+name: macOS app
+
+on:
+  pull_request:
+    paths:
+      - "apple/**"
+      - "crates/ffi/**"
+      - "crates/client/**"
+      - "crates/agent-link/**"
+      - "crates/uniffi-bindgen/**"
+      - "web/examples/**"
+      - "scripts/apple/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/macos-app.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apple/**"
+      - "crates/ffi/**"
+      - "crates/client/**"
+      - "crates/agent-link/**"
+      - "crates/uniffi-bindgen/**"
+      - "web/examples/**"
+      - "scripts/apple/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its superseded run; on main each
+# commit is its own group, so nothing there is cancelled.
+concurrency:
+  group: macos-app-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  app:
+    # The runner and Xcode publish-macos-app.yml releases with: macos-15's
+    # default Xcode (16.4) is too old for the app's Swift 6 concurrency
+    # checks, and macos-26 has Xcode 26.6, the newest hosted one
+    # (development uses Xcode 27, which hosted runners don't offer yet).
+    # Pinned, so an image update can't change the toolchain unannounced.
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # target/: the core (aarch64-apple-darwin, release) and the CLI the
+      # app carries share their dependencies' builds.
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # The toolchain is rust-toolchain.toml's; rustup installs it on the
+      # first cargo call, here rather than inside build-core.sh's quiet
+      # build.
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          rustup show active-toolchain || rustup toolchain install
+          node --version
+
+      # Both would also run as build phases of `xcodebuild test`; as steps
+      # of their own a Rust or npm failure shows here rather than deep in
+      # Xcode's log, and the build phases find them current.
+      - name: Rust core and Swift bindings
+        run: scripts/apple/build-core.sh
+      - name: Editor bundle
+        run: scripts/apple/build-editor.sh
+
+      - name: Xcode project
+        run: xcodegen generate --spec apple/project.yml
+
+      # Debug, arm64 (the scheme's test configuration), with both test
+      # targets.
+      - name: xcodebuild test
+        run: |
+          set -o pipefail
+          xcodebuild -project apple/NeoSCAD.xcodeproj -scheme NeoSCAD \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath apple/build/DerivedData \
+            -resultBundlePath "$RUNNER_TEMP/NeoSCAD.xcresult" \
+            test
+
+      # Which test failed and why, with its log and attachments; open it
+      # in Xcode.
+      - name: Keep the test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-app-xcresult
+          path: ${{ runner.temp }}/NeoSCAD.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
