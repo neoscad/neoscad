@@ -3003,7 +3003,7 @@ axis as exact B-spline surfaces. What they leave:
 From the dependency manager (`docs/dependencies.md`, issue #1).
 - The apps show the "declared but not fetched" hint but cannot fetch:
   a "Fetch missing libraries" banner (macOS, Windows, Linux) would call
-  the `project` crate's `fetch` from the app's core.
+  `scad_deps::fetch` from the app's core.
 - The MCP server and the LSP report unfetched dependencies as hints but
   do not offer to fetch them (an MCP `fetch` tool, an LSP code action).
 - `neoscad docs` with no `--in` does not index the modules of every
@@ -3022,6 +3022,13 @@ From the dependency manager (`docs/dependencies.md`, issue #1).
   path's time; a per-checkout stamp (size and mtime of every file) would
   make it near free.
 - Submodules and git LFS objects of a dependency are not checked out.
+- scad-deps is meant to move to its own repository (as sketch-solver
+  did), with NeoSCAD depending on it from crates.io; `crates/project` is
+  self-contained for that (its own version, licence, lints and tests).
+- The store's environment variables and default folder carry NeoSCAD's
+  name (`NEOSCAD_STORE`, `NEOSCAD_GIT`, `~/Library/Caches/NeoSCAD/store`)
+  although scad-deps is tool-agnostic; a neutral alias (`SCAD_STORE`)
+  read as well would keep one store shared by every tool.
 - The Windows links (directory symbolic link, then junction, then copy)
   compile and are reasoned through but are not yet exercised by CI on
   Windows.
