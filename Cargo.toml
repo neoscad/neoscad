@@ -104,8 +104,15 @@ strip = true
 [profile.dev]
 debug = "line-tables-only"
 
+# Dependencies optimised: the geometry kernels (manifold-rust and
+# clipper2-rust, vendored but not workspace members) at opt-level 0 made
+# the tests crawl. geom's fillet_build took 619 s and takes 39 s with this,
+# and CI's cargo test was most of a 40-minute run. Debug assertions and
+# overflow checks stay on, and Rust has no fast-math, so results are the
+# same bits.
 [profile.dev.package."*"]
 debug = false
+opt-level = 3
 
 # Release artifacts (cargo-dist): the release profile without the line
 # tables, which made the Linux binary 87 MB; function names stay, so a
