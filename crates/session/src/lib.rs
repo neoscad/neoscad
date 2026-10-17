@@ -1589,7 +1589,15 @@ impl Session {
             pipe.programs = vec![program.clone()];
             return Err(Stop::Exit(EXIT_ERROR));
         }
-        let libraries = parse::libraries(&self.parse, self.stores(), &program, &suffix, fs, libs);
+        let libraries = parse::libraries(
+            &self.parse,
+            self.stores(),
+            &program,
+            &suffix,
+            fs,
+            libs,
+            salt,
+        );
         for lib in &libraries {
             match (&lib.program, lib.open_error()) {
                 (Some(p), _) => {
