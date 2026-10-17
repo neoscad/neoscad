@@ -385,37 +385,37 @@ pub(crate) const SUBCOMMANDS: &[Subcommand] = {
         Subcommand {
             name: "add",
             run: pkg::add_main,
-            command: pkg::AddArgs::command,
+            command: pkg::add_command,
         },
         Subcommand {
             name: "remove",
             run: pkg::remove_main,
-            command: pkg::RemoveArgs::command,
+            command: pkg::remove_command,
         },
         Subcommand {
             name: "fetch",
             run: pkg::fetch_main,
-            command: pkg::FetchArgs::command,
+            command: pkg::fetch_command,
         },
         Subcommand {
             name: "update",
             run: pkg::update_main,
-            command: pkg::UpdateArgs::command,
+            command: pkg::update_command,
         },
         Subcommand {
             name: "tree",
             run: pkg::tree_main,
-            command: pkg::TreeArgs::command,
+            command: pkg::tree_command,
         },
         Subcommand {
             name: "vendor",
             run: pkg::vendor_main,
-            command: pkg::VendorArgs::command,
+            command: pkg::vendor_command,
         },
         Subcommand {
             name: "store",
             run: pkg::store_main,
-            command: pkg::StoreArgs::command,
+            command: pkg::store_command,
         },
         Subcommand {
             name: "serve",

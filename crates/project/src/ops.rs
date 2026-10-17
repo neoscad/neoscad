@@ -1,5 +1,5 @@
-//! The operations behind `neoscad add`, `remove`, `fetch`, `update`,
-//! `tree` and `vendor`.
+//! The operations behind `add`, `remove`, `fetch`, `update`, `tree` and
+//! `vendor` (of `scad-deps` and of `neoscad`).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -25,8 +25,8 @@ pub fn managed_dir(root: &Path) -> PathBuf {
     root.join(LIBRARIES)
 }
 
-/// How `neoscad fetch` (and `update`, `add`, `remove`, `vendor`) runs.
-#[derive(Debug, Clone, Default)]
+/// How a fetch (and `update`, `add`, `remove`, `vendor`) runs.
+#[derive(Debug, Clone)]
 pub struct FetchOptions {
     /// `--store`.
     pub store: Option<PathBuf>,
@@ -36,6 +36,21 @@ pub struct FetchOptions {
     /// Fail rather than change `scad.lock`.
     pub locked: bool,
     pub update: Update,
+    /// The command line's name, for the commands messages suggest
+    /// (`run \`scad-deps fetch\``); default `scad-deps`.
+    pub program: String,
+}
+
+impl Default for FetchOptions {
+    fn default() -> FetchOptions {
+        FetchOptions {
+            store: None,
+            offline: false,
+            locked: false,
+            update: Update::default(),
+            program: "scad-deps".to_string(),
+        }
+    }
 }
 
 /// What a fetch did.
@@ -80,7 +95,7 @@ pub fn fetch(
 ) -> Result<FetchReport> {
     let manifest = Manifest::read(root)?;
     let store = Store::open(opts.store.as_deref())?;
-    let _guard = store.lock(|| progress("waiting for another neoscad to finish with the store"))?;
+    let _guard = store.lock(|| progress("waiting for another fetch to finish with the store"))?;
     let lock_path = root.join(LOCKFILE);
     let old = Lock::read(&lock_path)?;
     if let Update::Names(names) = &opts.update {
@@ -88,7 +103,10 @@ pub fn fetch(
             let known = manifest.deps.iter().any(|d| d.key == *n)
                 || old.as_ref().is_some_and(|l| l.get(n).is_some());
             if !known {
-                bail!("`{n}` is not a dependency of this project (see `neoscad tree`)");
+                bail!(
+                    "`{n}` is not a dependency of this project (see `{} tree`)",
+                    opts.program
+                );
             }
         }
     }
@@ -104,19 +122,33 @@ pub fn fetch(
     let mut resolver;
     let mut lock = match current {
         Some(l) => {
-            resolver = Resolver::new(&store, opts.offline, None, &opts.update);
+            resolver = Resolver::new(&store, opts.offline, None, &opts.update, &opts.program);
             l.clone()
         }
         None => {
             if opts.locked {
                 return Err(Error(match &old {
-                    None => "--locked: there is no scad.lock; run `neoscad fetch` without --locked and commit it".to_string(),
-                    Some(_) if opts.update != Update::Nothing => "--locked: an update would change scad.lock".into(),
-                    Some(_) => "--locked: scad.lock is out of date with scad.toml; run `neoscad fetch` without --locked and commit scad.lock".into(),
+                    None => format!(
+                        "--locked: there is no scad.lock; run `{} fetch` without --locked and commit it",
+                        opts.program
+                    ),
+                    Some(_) if opts.update != Update::Nothing => {
+                        "--locked: an update would change scad.lock".into()
+                    }
+                    Some(_) => format!(
+                        "--locked: scad.lock is out of date with scad.toml; run `{} fetch` without --locked and commit scad.lock",
+                        opts.program
+                    ),
                 }));
             }
             report.resolved = true;
-            resolver = Resolver::new(&store, opts.offline, old.as_ref(), &opts.update);
+            resolver = Resolver::new(
+                &store,
+                opts.offline,
+                old.as_ref(),
+                &opts.update,
+                &opts.program,
+            );
             resolver.resolve(&manifest)?
         }
     };
@@ -153,9 +185,10 @@ pub fn fetch(
                     resolver.stats.checked_out += 1;
                     if !hash.is_empty() && h != *hash {
                         bail!(
-                            "`{}` at {} checks out to content hash {h}, but scad.lock records {hash}; the lockfile is wrong or the commit's content changed (run `neoscad update {}` to accept it)",
+                            "`{}` at {} checks out to content hash {h}, but scad.lock records {hash}; the lockfile is wrong or the commit's content changed (run `{} update {}` to accept it)",
                             p.name,
                             short(commit),
+                            opts.program,
                             p.name
                         );
                     }
@@ -165,9 +198,10 @@ pub fn fetch(
                     *hash = actual;
                 } else if actual != *hash {
                     bail!(
-                        "the store's copy of `{}` ({}) was modified: its content hash is {actual}, scad.lock records {hash}. Delete that directory (it is read-only: make it writable first) and run `neoscad fetch` again",
+                        "the store's copy of `{}` ({}) was modified: its content hash is {actual}, scad.lock records {hash}. Delete that directory (it is read-only: make it writable first) and run `{} fetch` again",
                         p.name,
-                        dir.display()
+                        dir.display(),
+                        opts.program
                     );
                 }
                 if mirror.exists() {
@@ -269,12 +303,12 @@ fn write_gitignore(root: &Path) {
     if !p.exists() {
         let _ = std::fs::write(
             &p,
-            "# Written by neoscad: .scad/ holds this machine's links to its library store.\n*\n",
+            "# .scad/ holds this machine's links to its library store: never commit it.\n*\n",
         );
     }
 }
 
-/// `neoscad add`: what to add.
+/// `add`: what to add.
 #[derive(Debug, Clone)]
 pub enum AddSpec {
     Git { url: String, reference: GitRef },
@@ -332,11 +366,12 @@ pub fn remove(root: &Path, key: &str) -> Result<()> {
     }
 }
 
-/// `neoscad tree`: the locked graph, from the project down.
-pub fn tree(root: &Path) -> Result<(String, Vec<Package>, Vec<String>)> {
+/// `tree`: the locked graph, from the project down, the packages, and
+/// notes for the user. `program` names the command line in the notes.
+pub fn tree(root: &Path, program: &str) -> Result<(String, Vec<Package>, Vec<String>)> {
     let manifest = Manifest::read(root)?;
     let Some(lock) = Lock::read(&root.join(LOCKFILE))? else {
-        bail!("there is no scad.lock yet; run `neoscad fetch`");
+        bail!("there is no scad.lock yet; run `{program} fetch`");
     };
     let stale = lock.inputs != inputs_hash(&manifest)?;
     let mut out = manifest.display_name();
@@ -367,7 +402,9 @@ pub fn tree(root: &Path) -> Result<(String, Vec<Package>, Vec<String>)> {
     walk(&lock, &roots, "", &mut Vec::new(), &mut out);
     let mut notes = Vec::new();
     if stale {
-        notes.push("scad.lock is out of date with scad.toml; run `neoscad fetch`".to_string());
+        notes.push(format!(
+            "scad.lock is out of date with scad.toml; run `{program} fetch`"
+        ));
     }
     let packages = lock
         .packages
@@ -425,7 +462,7 @@ fn describe(p: &crate::lock::Locked) -> String {
     }
 }
 
-/// What `neoscad vendor` wrote.
+/// What `vendor` wrote.
 #[derive(Debug, Clone)]
 pub struct VendorReport {
     pub dir: PathBuf,

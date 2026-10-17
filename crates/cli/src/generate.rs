@@ -294,12 +294,12 @@ fn environment() -> Roff {
              scad.toml above the file) its .scad/libraries comes first.",
         ),
         (
-            project::store::STORE_ENV,
+            scad_deps::store::STORE_ENV,
             "The store of shared git mirrors and dependency checkouts, instead of the \
              platform's cache directory (neoscad store path prints it).",
         ),
         (
-            project::git::GIT_ENV,
+            scad_deps::git::GIT_ENV,
             "The git executable that neoscad fetch runs, instead of git on the PATH.",
         ),
         (

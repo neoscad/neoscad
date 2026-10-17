@@ -386,7 +386,7 @@ pub struct ProjectRecord {
     file: PathBuf,
 }
 
-/// `neoscad store list`.
+/// `store list`.
 #[derive(Debug, Clone)]
 pub struct Listing {
     pub root: PathBuf,
@@ -406,7 +406,7 @@ pub struct Entry {
     pub used_by: Vec<PathBuf>,
 }
 
-/// `neoscad store gc`.
+/// `store gc`.
 #[derive(Debug, Clone, Default)]
 pub struct GcReport {
     pub removed: Vec<PathBuf>,

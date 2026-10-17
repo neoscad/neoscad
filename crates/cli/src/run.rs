@@ -238,7 +238,7 @@ fn load<W: Write>(job: &Job<'_>, paths: &Paths, con: &mut Console<W>) -> Result<
     let mut host = Host::from_env();
     // A project's dependencies (the nearest scad.toml above the input)
     // go after the input's own directory and before OPENSCADPATH.
-    let project = project::search::project_for(&path);
+    let project = crate::host::project_libs(&path);
     if let Some(p) = &project {
         host.libs = p.library_path(&host.libs);
     }

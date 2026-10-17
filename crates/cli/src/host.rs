@@ -147,11 +147,29 @@ impl Host {
     }
 }
 
-/// The project a main file belongs to (the nearest `scad.toml` above it):
-/// its `.scad/libraries` and `[paths]` go in front of the library path
-/// (`docs/dependencies.md`).
+/// The project a main file belongs to (the nearest `scad.toml` above it),
+/// from scad-deps' answer: its `.scad/libraries` and `[paths]` go in front
+/// of the library path (`docs/dependencies.md`).
+pub fn project_libs(main: &Path) -> Option<lang::project::ProjectLibs> {
+    let p = scad_deps::search::project_for(main)?;
+    Some(lang::project::ProjectLibs {
+        root: p.root,
+        dirs: p.dirs,
+        declared: p
+            .declared
+            .into_iter()
+            .map(|d| lang::project::Declared {
+                folder: d.folder,
+                fetched: d.fetched,
+            })
+            .collect(),
+        stamp: p.stamp,
+    })
+}
+
+/// [`project_libs`] for a session.
 pub fn project_resolver() -> session::ProjectResolver {
-    Arc::new(|main: &Path| project::search::project_for(main))
+    Arc::new(project_libs)
 }
 
 /// One place fonts come from.

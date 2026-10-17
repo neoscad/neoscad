@@ -39,7 +39,7 @@ lang = { package = "neoscad-lang", path = "../lang", features = ["host"] }
 lsp = { package = "neoscad-lsp", path = "../lsp" }
 # A document's project dependencies on its library path (`host.rs`;
 # docs/dependencies.md): reads scad.toml and the project's links, no git.
-project = { package = "neoscad-project", path = "../project" }
+scad-deps = { path = "../project", version = "0.1.0" }
 render = { package = "neoscad-render", path = "../render" }
 serde_json.workspace = true
 session = { package = "neoscad-session", path = "../session" }

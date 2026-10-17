@@ -71,9 +71,10 @@ eval = { package = "neoscad-eval", path = "../eval" }
 geom = { package = "neoscad-geom", path = "../geom" }
 io = { package = "neoscad-io", path = "../io" }
 lsp = { package = "neoscad-lsp", path = "../lsp" }
-# Project dependencies (src/pkg.rs; scad.toml, the store, the links) and
-# the search path a project gives each file (src/host.rs).
-project = { package = "neoscad-project", path = "../project" }
+# Project dependencies: `neoscad add`, `fetch` and the rest are scad-deps'
+# own command line under neoscad's name (src/pkg.rs), and src/host.rs
+# turns a project's search path into the session's `ProjectLibs`.
+scad-deps = { path = "../project", version = "0.1.0", features = ["cli"] }
 render = { package = "neoscad-render", path = "../render" }
 session = { package = "neoscad-session", path = "../session" }
 serde_json.workspace = true

@@ -293,7 +293,7 @@ pub fn main(args: Vec<OsString>) -> u8 {
     let mut read: Vec<PathBuf> = open.libs.0.clone();
     // A project's dependencies are links into the shared store
     // (`docs/dependencies.md`): readable like any library directory.
-    if let Ok(store) = project::store::locate(None) {
+    if let Ok(store) = scad_deps::store::locate(None) {
         read.push(store);
     }
     for f in open.font_sources() {

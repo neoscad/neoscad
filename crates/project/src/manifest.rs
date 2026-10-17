@@ -21,7 +21,7 @@
 //! project-relative directories to the search path, for libraries the
 //! project keeps itself (a git submodule, a vendored folder).
 //!
-//! `neoscad add` and `remove` edit the text line by line ([`set_dependency`],
+//! `add` and `remove` edit the text line by line ([`set_dependency`],
 //! [`remove_dependency`]), so the rest of the file (comments, order,
 //! other tables) is kept as written.
 
@@ -188,7 +188,7 @@ impl Manifest {
         })
     }
 
-    /// The name the project goes by in messages and `neoscad tree`:
+    /// The name the project goes by in messages and `tree`:
     /// `[package] name`, else its directory's name.
     pub fn display_name(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
@@ -313,7 +313,7 @@ pub fn toml_key(k: &str) -> String {
 }
 
 impl Dep {
-    /// The entry's inline table, as `neoscad add` writes it.
+    /// The entry's inline table, as `add` writes it.
     pub fn inline(&self) -> String {
         let mut parts = Vec::new();
         match &self.source {

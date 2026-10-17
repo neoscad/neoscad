@@ -15,8 +15,8 @@
 //!
 //! A requirement that matches a `scad.lock` entry exactly (key, URL,
 //! revision, `include_root`) keeps the locked commit unless the key is
-//! being updated, so `neoscad fetch` never moves a branch by itself;
-//! `neoscad update` asks the remotes again.
+//! being updated, so a fetch never moves a branch by itself; an update
+//! asks the remotes again.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ use crate::manifest::{Dep, GitRef, MANIFEST, Manifest, Source};
 use crate::store::{Store, normalize_url};
 use crate::version::Version;
 
-/// Which keys `neoscad update` asks the remotes about.
+/// Which keys an update asks the remotes about.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Update {
     /// None: keep what the lockfile has where it still applies.
@@ -200,6 +200,8 @@ pub struct Resolver<'a> {
     pub offline: bool,
     pub prefer: Option<&'a Lock>,
     pub update: &'a Update,
+    /// The command line's name, for the commands messages suggest.
+    pub program: &'a str,
     pub stats: Stats,
     fetched: BTreeSet<PathBuf>,
 }
@@ -210,12 +212,14 @@ impl<'a> Resolver<'a> {
         offline: bool,
         prefer: Option<&'a Lock>,
         update: &'a Update,
+        program: &'a str,
     ) -> Resolver<'a> {
         Resolver {
             store,
             offline,
             prefer,
             update,
+            program,
             stats: Stats::default(),
             fetched: BTreeSet::new(),
         }
@@ -404,7 +408,8 @@ impl<'a> Resolver<'a> {
         if !mirror.exists() {
             if self.offline {
                 bail!(
-                    "`{key}` ({url}) is not in the store, and --offline does not fetch; run `neoscad fetch` once with the network"
+                    "`{key}` ({url}) is not in the store, and --offline does not fetch; run `{} fetch` once with the network",
+                    self.program
                 );
             }
             self.store.clone_mirror(url)?;

@@ -29,7 +29,7 @@ pub fn config() -> session::Config {
     let mut cfg = session::Config::new(fs.clone(), libs);
     // A document's project (the nearest scad.toml above it) puts its
     // fetched dependencies before OPENSCADPATH (docs/dependencies.md).
-    cfg.project = Some(Arc::new(|main: &Path| project::search::project_for(main)));
+    cfg.project = Some(Arc::new(project_libs));
     let font_dirs = user_font_dirs(
         std::env::var_os("HOME").map(PathBuf::from),
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
@@ -139,6 +139,26 @@ pub fn iso8601_now() -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()) as i64,
     )
+}
+
+/// The project a main file belongs to (the nearest `scad.toml` above it),
+/// from scad-deps' answer: its `.scad/libraries` and `[paths]` go in front
+/// of the library path (`docs/dependencies.md`).
+pub(crate) fn project_libs(main: &Path) -> Option<lang::project::ProjectLibs> {
+    let p = scad_deps::search::project_for(main)?;
+    Some(lang::project::ProjectLibs {
+        root: p.root,
+        dirs: p.dirs,
+        declared: p
+            .declared
+            .into_iter()
+            .map(|d| lang::project::Declared {
+                folder: d.folder,
+                fetched: d.fetched,
+            })
+            .collect(),
+        stamp: p.stamp,
+    })
 }
 
 #[cfg(test)]

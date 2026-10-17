@@ -1,16 +1,43 @@
-//! What a project adds to a main file's library path: hosts call
-//! [`project_for`] for each file they evaluate (it reads a few small files
-//! and links, and runs no git), and put the answer in front of their
-//! library path (`lang::project::ProjectLibs::library_path`).
+//! What a project adds to a main file's library path: a host calls
+//! [`project_for`] for each file it evaluates (it reads a few small files
+//! and links, and runs no git) and searches [`ProjectPaths::dirs`] after
+//! the including file's own directory and before its own library path
+//! (`OPENSCADPATH` and the rest).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use lang::project::{Declared, ProjectLibs};
-
 use crate::lock::Lock;
 use crate::manifest::{LIBRARIES, LOCKFILE, MANIFEST, Manifest};
+
+/// A project's part of the search path for one main file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectPaths {
+    /// The project root (the directory holding `scad.toml`).
+    pub root: PathBuf,
+    /// Directories searched before the host's library path, in order:
+    /// the managed `<root>/.scad/libraries`, then the manifest's own
+    /// `[paths] libraries`.
+    pub dirs: Vec<PathBuf>,
+    /// The dependencies the manifest (and the lockfile) declare, by the
+    /// folder name an `include <Name/…>` uses.
+    pub declared: Vec<Declared>,
+    /// Changes whenever a link in the managed directory points somewhere
+    /// else (after a fetch or an update), so a host that caches parses
+    /// keyed by file can tell that an include may now resolve to another
+    /// copy.
+    pub stamp: u64,
+}
+
+/// One declared dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declared {
+    /// The folder name: `include <BOSL2/std.scad>` names `BOSL2`.
+    pub folder: String,
+    /// Whether its link exists and resolves.
+    pub fetched: bool,
+}
 
 /// The nearest directory at or above `start` holding a `scad.toml`.
 pub fn find_root(start: &Path) -> Option<PathBuf> {
@@ -25,7 +52,7 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
 /// `<root>/.scad/libraries`, then the manifest's `[paths] libraries`, and
 /// its declared dependencies with whether each is fetched. None outside a
 /// project.
-pub fn project_for(main: &Path) -> Option<ProjectLibs> {
+pub fn project_for(main: &Path) -> Option<ProjectPaths> {
     let dir = main.parent()?;
     let root = find_root(if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -44,7 +71,7 @@ pub fn project_for(main: &Path) -> Option<ProjectLibs> {
         }
     };
     // A manifest that does not parse still gives the managed directory;
-    // `neoscad fetch` reports the error.
+    // a fetch reports the error.
     if let Ok(m) = Manifest::read(&root) {
         for d in &m.deps {
             add(&d.folder);
@@ -70,7 +97,7 @@ pub fn project_for(main: &Path) -> Option<ProjectLibs> {
         entries.sort();
         entries.hash(&mut h);
     }
-    Some(ProjectLibs {
+    Some(ProjectPaths {
         root,
         dirs,
         declared,

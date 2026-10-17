@@ -1,5 +1,5 @@
 //! `scad.lock`: the dependency graph as resolved, written by
-//! `neoscad fetch` and meant to be committed:
+//! a fetch and meant to be committed:
 //!
 //! ```toml
 //! version = 1
@@ -19,7 +19,7 @@
 //! when it differs from the key) beside what it resolved to. A path
 //! dependency has `source = "path+DIR"` and no commit or hash.
 //! `inputs` is a hash of every requirement the project and its path
-//! dependencies declare: while it matches, `neoscad fetch` links the
+//! dependencies declare: while it matches, a fetch links the
 //! locked packages without resolving anything (and without running git
 //! when their checkouts are in the store).
 //!
@@ -111,7 +111,7 @@ impl Lock {
         let raw: Raw = basic_toml::from_str(text).map_err(|e| Error(e.to_string()))?;
         if raw.version != VERSION {
             bail!(
-                "lockfile version {} is not one this neoscad reads ({VERSION}); update neoscad, or delete scad.lock to resolve again",
+                "lockfile version {} is not one this version reads ({VERSION}); update the tool, or delete scad.lock to resolve again",
                 raw.version
             );
         }
@@ -161,7 +161,7 @@ impl Lock {
     pub fn render(&self) -> String {
         let mut s = String::from(
             "# scad.lock: the exact revisions of scad.toml's dependencies, written by\n\
-             # `neoscad fetch`. Commit it with scad.toml; do not edit it by hand.\n",
+             # a fetch (scad-deps, NeoSCAD). Commit it with scad.toml; do not edit it.\n",
         );
         s.push_str(&format!("version = {VERSION}\n"));
         s.push_str(&format!("inputs = {}\n", quote(&self.inputs)));
