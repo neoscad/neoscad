@@ -117,11 +117,6 @@ jobs:
           echo "OPENSCAD_RENDERER=$app/Contents/MacOS/OpenSCAD" >> "$GITHUB_ENV"
 
       - run: cargo clippy --locked --all-targets -- -D warnings
-      # scad-deps is published on crates.io from this repository: packaging
-      # builds it alone, from what the .crate holds, with default features
-      # (so no path dependency or NeoSCAD crate can creep in), and the CLI
-      # feature is checked by the workspace's clippy and tests.
-      - run: cargo package --locked -p scad-deps
       - name: cargo test
         run: |
           if [ "$RUNNER_OS" = macOS ]; then
@@ -193,9 +188,9 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo build --locked --release -p neoscad-cli
-      # scad-deps: the dependency commands and their links (or copies)
-      # (its `cli` feature is on through neoscad-cli).
-      - run: cargo test --locked --no-fail-fast -p neoscad-cli -p neoscad-lang -p scad-deps
+      # neoscad-cli's tests/dependencies.rs: the scad-deps commands under
+      # neoscad's name, and their links (or copies).
+      - run: cargo test --locked --no-fail-fast -p neoscad-cli -p neoscad-lang
       # agent-link's unit tests (named pipes, discovery). Its tests/link.rs
       # assumes Unix end-of-stream and scan behaviour, so not that.
       - run: cargo test --locked --no-fail-fast -p neoscad-agent-link --lib

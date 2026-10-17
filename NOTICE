@@ -3,8 +3,9 @@ later (see LICENSE). Binaries that include Apache-2.0-only dependencies
 such as manifold-rust are distributed under GPL version 3 or later, since
 the FSF deems Apache-2.0 compatible with GPLv3 but not with GPLv2.
 
-The scad-deps crate (crates/project, the dependency manager) is licensed
-under the MIT licence instead (see crates/project/LICENSE).
+The scad-deps crate (the dependency manager, from
+https://github.com/neoscad/scad-deps) is licensed under the MIT licence
+instead (see packaging/licenses/scad-deps-MIT.txt).
 
 NeoSCAD contains code ported from the following third-party software, whose
 notices follow. Vendored crates are described in

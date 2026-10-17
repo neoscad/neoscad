@@ -3,7 +3,8 @@
 //! through `.scad/libraries` in every host's search order, over local git
 //! repositories (file:// URLs, no network), each test with its own store.
 //! The commands themselves (locking, the store, `--locked`, `--offline`,
-//! gc, conflicts) are tested in `crates/project/tests/cli.rs`.
+//! gc, conflicts) are tested in the scad-deps crate itself
+//! (github.com/neoscad/scad-deps, tests/cli.rs).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

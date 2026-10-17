@@ -126,10 +126,11 @@ later; see the FSF's
 [licence list](https://www.gnu.org/licenses/license-list.html#apache2)).
 The source files themselves remain GPL-2.0-or-later.
 
-One member crate is MIT-licensed instead: `scad-deps` (`crates/project`,
-the dependency manager), so that tools under any licence can share its
-formats and store. It depends on nothing under the GPL, and its notice
-ships with the binaries (`packaging/licenses/`).
+The dependency manager, `scad-deps`, is NeoSCAD's own crate in its own
+repository ([neoscad/scad-deps](https://github.com/neoscad/scad-deps)),
+MIT-licensed so that tools under any licence can share its formats and
+store. It depends on nothing under the GPL, and its notice ships with the
+binaries (`packaging/licenses/`).
 
 ## Credits
 
