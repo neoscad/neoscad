@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.1
 
 ### New
 
@@ -17,8 +17,7 @@
   back while it is off screen. The package is licensed
   `GPL-2.0-or-later WITH Classpath-exception-2.0`, so a page that uses
   it unmodified may license its own code as it likes
-  (`docs/js-package.md`, `web/package/README.md`). It is not published
-  to npm yet.
+  (`docs/js-package.md`, `web/package/README.md`).
 - **Moving parts in `@neoscad/viewer`.** A viewer can show several scenes
   and move each one rigidly on every frame without running the model
   again: `viewer.addScene(result.scene)` returns a handle whose
@@ -38,6 +37,8 @@
 - **Several 3D views on one page.** Starting more than one web viewer at
   the same moment could leave the first ones blank or on WebGL: the
   viewer module was initialised twice.
+- **Building the macOS app where cargo is not in `~/.cargo/bin`.** The
+  app's build scripts now find cargo wherever the caller's `PATH` has it.
 
 ## 0.7.0
 
