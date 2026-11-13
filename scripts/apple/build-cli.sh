@@ -62,9 +62,11 @@ target_dir=${CARGO_TARGET_DIR:-$root/target}
 # build settings arrive as environment variables, and build scripts that
 # watch them would rebuild the CLI whenever it is built from the other
 # side.
+# shellcheck source=scripts/apple/cargo-path.sh
+source "$root/scripts/apple/cargo-path.sh"
 cargo_env=(env -i
     HOME="$HOME"
-    PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    PATH="$(neoscad_cargo_path)"
     MACOSX_DEPLOYMENT_TARGET=15.0
     CARGO_TARGET_DIR="$target_dir"
     TERM="${TERM:-dumb}")

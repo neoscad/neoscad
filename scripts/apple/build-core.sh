@@ -142,15 +142,10 @@ fi
 # watch them would rebuild whenever the core is built from Xcode after the
 # command line or the other way round. The deployment target is the
 # app's, so the linker does not warn that the library needs a newer macOS.
-#
-# The PATH keeps the directory of the cargo the caller would run (and
-# $CARGO_HOME/bin): rustup is not always in ~/.cargo/bin (GitHub's macOS
-# images from 2026-11 install it elsewhere), and Xcode's PATH may lack it.
-cargo_path="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-if [ -n "${CARGO_HOME:-}" ]; then cargo_path="$CARGO_HOME/bin:$cargo_path"; fi
-if cargo_bin=$(command -v cargo 2>/dev/null) && [ -n "$cargo_bin" ]; then
-    cargo_path="$(dirname "$cargo_bin"):$cargo_path"
-fi
+# The PATH: cargo-path.sh.
+# shellcheck source=scripts/apple/cargo-path.sh
+source "$root/scripts/apple/cargo-path.sh"
+cargo_path=$(neoscad_cargo_path)
 cargo_env=(env -i
     HOME="$HOME"
     PATH="$cargo_path"
