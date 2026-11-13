@@ -32,6 +32,9 @@
 //! - [`snapshot`] lays out and annotates contact sheets.
 //! - [`packed`] flattens a scene into bytes that cross a thread (a web
 //!   worker) and upload as they are (`Gpu::upload_packed`).
+//! - [`placement`] is a rigid transform placing one of several models in
+//!   a view (`Viewport::add_model`), so parts can move without a new
+//!   scene.
 
 // On the web, wgpu's handles are neither `Send` nor `Sync` (a browser's
 // GPU objects belong to one thread), so the `Arc`s that share pipelines and
@@ -43,6 +46,7 @@ pub mod camera;
 pub mod hershey;
 pub mod overlay;
 pub mod packed;
+pub mod placement;
 pub mod preview;
 pub mod scene;
 pub mod scheme;

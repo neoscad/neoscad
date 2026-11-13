@@ -414,3 +414,124 @@ fn image_space_csg_draws_in_a_multisampled_view() {
     assert!(foreground_of(false) > 100);
     assert_eq!(foreground_of(true), 0);
 }
+
+/// A column-major matrix moving by `t`.
+fn moved(t: [f32; 3]) -> render::placement::Placement {
+    let mut m = [0.0f32; 16];
+    for i in 0..4 {
+        m[i * 5] = 1.0;
+    }
+    m[12..15].copy_from_slice(&t);
+    render::placement::Placement::from_column_major(&m).unwrap()
+}
+
+#[test]
+fn an_added_model_at_identity_draws_as_one_shown_alone() {
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let model = Arc::new(gpu.upload(&Scene::new(Some(&cube10()), &scheme)).unwrap());
+    let draw = |add: bool| {
+        let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+        vp.set_settings(ViewSettings { axes: true, ..BARE });
+        vp.attach_texture(96, 80, 1.0);
+        if add {
+            vp.add_model(model.clone()).unwrap();
+        } else {
+            vp.set_model(model.clone(), 1);
+        }
+        vp.read_pixels_blocking().unwrap()
+    };
+    // The placed path folds the identity into the same uniforms and
+    // draws in the same order, so not one pixel differs.
+    assert_eq!(draw(true).rgba, draw(false).rgba);
+}
+
+#[test]
+fn moving_an_added_model_moves_its_pixels_and_nothing_else() {
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let cube = Arc::new(gpu.upload(&Scene::new(Some(&cube10()), &scheme)).unwrap());
+    let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+    vp.set_settings(BARE);
+    vp.attach_texture(160, 80, 1.0);
+    let left = vp.add_model(cube.clone()).unwrap();
+    let right = vp.add_model(cube.clone()).unwrap();
+    assert_ne!(left, right);
+    assert!(vp.set_placement(right, moved([30.0, 0.0, 0.0])));
+    assert_eq!(vp.bounds(), Some(([0.0; 3], [40.0, 10.0, 10.0])));
+    vp.view_all();
+    let two = vp.read_pixels_blocking().unwrap();
+    assert!(!vp.needs_draw());
+
+    // Moving one model asks for one frame; the camera stays.
+    let camera = *vp.camera();
+    assert!(vp.set_placement(right, moved([30.0, 0.0, 12.0])));
+    assert!(vp.needs_draw());
+    assert_eq!(*vp.camera(), camera);
+    let lifted = vp.read_pixels_blocking().unwrap();
+    // The same placement again is not a change.
+    assert!(vp.set_placement(right, moved([30.0, 0.0, 12.0])));
+    assert!(!vp.needs_draw());
+
+    // Columns of the left half (the left cube) are untouched; the right
+    // half changed.
+    let differs = |x0: usize, x1: usize| {
+        (0..80).any(|y| {
+            (x0..x1).any(|x| {
+                let i = (y * 160 + x) * 4;
+                two.rgba[i..i + 4] != lifted.rgba[i..i + 4]
+            })
+        })
+    };
+    assert!(!differs(0, 60), "the left cube stays put");
+    assert!(differs(100, 160), "the right cube moved");
+
+    // Removing it leaves the left cube alone; ids are not reused.
+    assert!(vp.remove_model(right));
+    assert!(!vp.remove_model(right));
+    assert!(!vp.set_placement(right, moved([0.0; 3])));
+    assert_eq!(vp.added_models().collect::<Vec<_>>(), vec![left]);
+    let third = vp.add_model(cube.clone()).unwrap();
+    assert!(third > right);
+
+    // set_model replaces them all; clear_model clears them all.
+    vp.set_model(cube.clone(), 1);
+    assert_eq!(vp.added_models().count(), 0);
+    vp.add_model(cube).unwrap();
+    vp.clear_model();
+    assert_eq!(vp.added_models().count(), 0);
+    assert_eq!(vp.bounds(), None);
+}
+
+#[test]
+fn image_space_csg_cannot_be_one_of_several_models() {
+    use render::scene::{CsgOp, CsgPrimitive};
+    let Some(gpu) = gpu() else { return };
+    let scheme = ColorScheme::cornfield();
+    let Geometry::PolySet(cube) = cube10() else {
+        unreachable!()
+    };
+    let mut scene = Scene::empty(&scheme, Some(([0.0; 3], [10.0; 3])));
+    scene.push_image_csg(vec![
+        CsgPrimitive {
+            mesh: cube.clone(),
+            matrix: None,
+            op: CsgOp::Intersection,
+        },
+        CsgPrimitive {
+            mesh: cube,
+            matrix: None,
+            op: CsgOp::Subtraction,
+        },
+    ]);
+    let csg = Arc::new(gpu.upload(&scene).unwrap());
+    let plain = Arc::new(gpu.upload(&Scene::new(Some(&cube10()), &scheme)).unwrap());
+    let mut vp = Viewport::new(gpu.clone(), scheme.clone()).unwrap();
+    assert_eq!(
+        vp.add_model(csg.clone()),
+        Err(render::viewport::NotPlaceable)
+    );
+    // Nor beside a model shown alone that has some.
+    vp.set_model(csg, 1);
+    assert!(vp.add_model(plain).is_err());
+}

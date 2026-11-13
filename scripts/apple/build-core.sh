@@ -142,9 +142,13 @@ fi
 # watch them would rebuild whenever the core is built from Xcode after the
 # command line or the other way round. The deployment target is the
 # app's, so the linker does not warn that the library needs a newer macOS.
+# The PATH: cargo-path.sh.
+# shellcheck source=scripts/apple/cargo-path.sh
+source "$root/scripts/apple/cargo-path.sh"
+cargo_path=$(neoscad_cargo_path)
 cargo_env=(env -i
     HOME="$HOME"
-    PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    PATH="$cargo_path"
     MACOSX_DEPLOYMENT_TARGET=15.0
     TERM="${TERM:-dumb}")
 if [ -n "${RUSTUP_HOME:-}" ]; then cargo_env+=(RUSTUP_HOME="$RUSTUP_HOME"); fi

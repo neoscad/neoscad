@@ -8,6 +8,10 @@
 //! viewer.setModel(new Uint8Array(faces), new Uint8Array(edges), meta, generation);
 //! viewer.setSettings({ edges: true });
 //! viewer.onClick((x, y) => pick(viewer.rayAt(x, y)));
+//! // Several models, each moved rigidly without a new scene:
+//! const gear = viewer.addModel(new Uint8Array(faces), new Uint8Array(edges), meta);
+//! viewer.setModelTransform(gear, matrix); // a Float32Array(16), column-major
+//! viewer.removeModel(gear);
 //! ```
 //!
 //! # One thread, borrowed briefly
@@ -78,6 +82,20 @@ struct Shared {
     on_click: RefCell<Option<js_sys::Function>>,
     on_camera: RefCell<Option<js_sys::Function>>,
     reported_camera: RefCell<Option<wire::CameraState>>,
+    /// The page's own background (`setBackground`), top and bottom,
+    /// drawn instead of the colour scheme's.
+    background: Cell<Option<([f32; 4], [f32; 4])>>,
+}
+
+impl Shared {
+    /// `scheme` with the page's background, if it set one.
+    fn with_background(&self, mut scheme: ColorScheme) -> ColorScheme {
+        if let Some((top, bottom)) = self.background.get() {
+            scheme.background.0 = top;
+            scheme.background_stop.0 = bottom;
+        }
+        scheme
+    }
 }
 
 type Listener = Closure<dyn FnMut(Event)>;
@@ -448,6 +466,7 @@ impl Viewer {
             on_click: RefCell::new(None),
             on_camera: RefCell::new(None),
             reported_camera: RefCell::new(None),
+            background: Cell::new(None),
         });
 
         let mut listeners = Vec::new();
@@ -587,18 +606,81 @@ impl Viewer {
         Ok(shown)
     }
 
-    /// Show nothing (keeping the camera).
+    /// Show nothing (keeping the camera), removing the added models too.
     #[wasm_bindgen(js_name = clearModel)]
     pub fn clear_model(&self) {
         self.shared.view.borrow_mut().clear_model();
         self.shared.schedule();
     }
 
-    /// The model's bounding box, `[[x, y, z], [x, y, z]]`, or null.
+    /// Show a packed scene as well as the models already shown, at the
+    /// identity transform, and return its id for `setModelTransform` and
+    /// `removeModel` (a positive integer, never reused by this viewer).
+    /// `setModel` and `clearModel` remove every added model. The first
+    /// model of a view with no camera yet is fitted, as with `setModel`.
+    ///
+    /// Throws on a scene that does not hold together, and on a preview
+    /// with image-space CSG (a difference or an intersection), which only
+    /// `setModel` can show; render mode has none.
+    #[wasm_bindgen(js_name = addModel)]
+    pub fn add_model(&self, faces: Vec<u8>, edges: Vec<u8>, meta: JsValue) -> Result<f64, JsError> {
+        let meta: render::PackedMeta = from_js(&meta)?;
+        let packed = PackedScene { faces, edges, meta };
+        let model = {
+            let v = self.shared.view.borrow();
+            v.gpu().upload_packed(&packed).map_err(js_error)?
+        };
+        drop(packed);
+        let id = self
+            .shared
+            .view
+            .borrow_mut()
+            .add_model(Arc::new(model))
+            .map_err(js_error)?;
+        self.shared.schedule();
+        // Ids count up from 1, far below 2^53.
+        Ok(id as f64)
+    }
+
+    /// Move the added model `id` to `matrix`: 16 numbers, column-major (a
+    /// `Float32Array`, as WebGL and `DOMMatrix.toFloat32Array()` order
+    /// them), a rotation and a translation only. Asks for one frame; the
+    /// model is not uploaded again, so this is cheap enough to call on
+    /// every animation frame. False when there is no such model (it was
+    /// removed, or `setModel` replaced it). Throws on a matrix that
+    /// scales, shears or mirrors: normals are carried by the rotation
+    /// alone, and a mirror would turn the faces inside out.
+    ///
+    /// The ray `rayAt` gives is in the view's coordinates; for a moved
+    /// model, carry it into the model's own by the inverse of its matrix
+    /// before picking against the model's scene.
+    #[wasm_bindgen(js_name = setModelTransform)]
+    pub fn set_model_transform(&self, id: f64, matrix: &[f32]) -> Result<bool, JsError> {
+        let placement =
+            render::placement::Placement::from_column_major(matrix).map_err(js_error)?;
+        let found = self
+            .shared
+            .view
+            .borrow_mut()
+            .set_placement(id as u64, placement);
+        self.shared.schedule();
+        Ok(found)
+    }
+
+    /// Stop showing the added model `id`. Whether there was one.
+    #[wasm_bindgen(js_name = removeModel)]
+    pub fn remove_model(&self, id: f64) -> bool {
+        let removed = self.shared.view.borrow_mut().remove_model(id as u64);
+        self.shared.schedule();
+        removed
+    }
+
+    /// The bounding box of everything shown, `[[x, y, z], [x, y, z]]`, or
+    /// null: the model, and each added model at its current transform
+    /// (what View All fits).
     #[wasm_bindgen(js_name = modelBounds)]
     pub fn model_bounds(&self) -> JsValue {
-        let v = self.shared.view.borrow();
-        to_js(&v.model().and_then(|m| m.bounding_box()))
+        to_js(&self.shared.view.borrow().bounds())
     }
 
     // --- The camera -----------------------------------------------------
@@ -646,7 +728,8 @@ impl Viewer {
         Ok(())
     }
 
-    /// View All: centre on the model and fit it.
+    /// View All: centre on everything shown (the added models where they
+    /// are now) and fit it.
     #[wasm_bindgen(js_name = viewAll)]
     pub fn view_all(&self) {
         self.shared.view.borrow_mut().view_all();
@@ -751,7 +834,40 @@ impl Viewer {
     pub fn set_color_scheme(&self, name: &str) -> Result<(), JsError> {
         let s = render::scheme::find(name)
             .ok_or_else(|| JsError::new(&format!("no colour scheme called {name:?}")))?;
+        let s = self.shared.with_background(s);
         self.shared.view.borrow_mut().set_scheme(s);
+        self.shared.schedule();
+        Ok(())
+    }
+
+    /// Draw the background from `top` to `bottom` (CSS `#rrggbb` or
+    /// `#rgb`; `bottom` missing: flat `top`) instead of the colour
+    /// scheme's, through later scheme changes too; `top` missing: the
+    /// scheme's own again. For a view that must match the page around
+    /// it, such as a still image it replaces. The lines and the model's
+    /// colours stay the scheme's.
+    #[wasm_bindgen(js_name = setBackground)]
+    pub fn set_background(
+        &self,
+        top: Option<String>,
+        bottom: Option<String>,
+    ) -> Result<(), JsError> {
+        let parse = |s: &str| {
+            wire::css_hex(s).ok_or_else(|| JsError::new(&format!("not a #rrggbb colour: {s:?}")))
+        };
+        let background = match &top {
+            None => None,
+            Some(t) => {
+                let t = parse(t)?;
+                let b = bottom.as_deref().map(parse).transpose()?.unwrap_or(t);
+                Some((t, b))
+            }
+        };
+        self.shared.background.set(background);
+        let name = self.shared.view.borrow().scheme().name.clone();
+        let scheme = render::scheme::find(&name).unwrap_or_else(ColorScheme::cornfield);
+        let scheme = self.shared.with_background(scheme);
+        self.shared.view.borrow_mut().set_scheme(scheme);
         self.shared.schedule();
         Ok(())
     }

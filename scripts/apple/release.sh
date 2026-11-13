@@ -463,9 +463,11 @@ mkdir -p "$work" "$dist" "$app_stage" "$cli_stage" "$dsym_stage"
 # core's compiled dependencies and its deployment target, and the
 # release's builds leave the developer's target/release alone (but for
 # the depth guard's `conformance`).
+# shellcheck source=scripts/apple/cargo-path.sh
+source "$root/scripts/apple/cargo-path.sh"
 cargo_env=(env -i
     HOME="$HOME"
-    PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    PATH="$(neoscad_cargo_path)"
     MACOSX_DEPLOYMENT_TARGET=15.0
     CARGO_TARGET_DIR="$target_dir"
     TERM="${TERM:-dumb}")

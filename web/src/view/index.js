@@ -13,13 +13,18 @@
 // viewer is wrapped to it in `wrapWasm`):
 //
 //   setScene(packedScene | null)  setSettings({axes, scales, grid, edges,
-//   crosshairs, orthographic, lighting, scheme})  preset(name)  viewAll()
+//   crosshairs, orthographic, lighting, scheme, background (wasm only)})
+//   preset(name)  viewAll()
 //   resetView()  setAnnotations({markers, lines} | null)  focus(point)
 //   camera() -> {vpt, vpr, vpd, vpf}  setFileView({vpt?, vpr?, vpd?, vpf?})
 //   rayAt(x, y) -> {origin, direction}  resize()  dispose()  schemes  kind
 //   onPick = (ray) => ...
 //   image(width, height) -> Promise<{width, height, rgba}>   (wasm only; the
 //   canvas fallback's 2D canvas is copied instead)
+//   supportsTransforms (wasm only: true; the canvas fallback has none):
+//   addScene(packedScene) -> id  setSceneMatrix(id, Float32Array(16)) -> bool
+//   removeScene(id) -> bool, several scenes each moved by a rigid matrix
+//   (column-major); setScene replaces them all with one
 //
 // Annotations are the viewer's shape: lines `{points: [[x,y,z], ...],
 // closed, color}` and markers `{point, label, color, bboxMin?, bboxMax?}`,
@@ -155,6 +160,10 @@ function wrapWasm(mod, v, canvas) {
     schemes: mod.Viewer.colorSchemes(),
     onPick: null,
     raw: v,
+    supportsTransforms: true,
+    addScene: (scene) => v.addModel(new Uint8Array(scene.faces), new Uint8Array(scene.edges), scene.meta),
+    setSceneMatrix: (id, m) => v.setModelTransform(id, m),
+    removeScene: (id) => v.removeModel(id),
     setScene(scene) {
       if (!scene) {
         v.clearModel();
@@ -169,6 +178,12 @@ function wrapWasm(mod, v, canvas) {
       if (s.scheme && s.scheme !== scheme) {
         v.setColorScheme(s.scheme);
         scheme = s.scheme;
+      }
+      // A page's own background ("#rrggbb", or [top, bottom] for a
+      // gradient; null for the scheme's), which the demo never sets.
+      if (s.background !== undefined) {
+        const [top, bottom] = Array.isArray(s.background) ? s.background : [s.background, s.background];
+        v.setBackground(top ?? undefined, bottom ?? undefined);
       }
     },
     preset: (name) => v.setView(name),

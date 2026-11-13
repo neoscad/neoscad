@@ -19,6 +19,19 @@
   it unmodified may license its own code as it likes
   (`docs/js-package.md`, `web/package/README.md`). It is not published
   to npm yet.
+- **Moving parts in `@neoscad/viewer`.** A viewer can show several scenes
+  and move each one rigidly on every frame without running the model
+  again: `viewer.addScene(result.scene)` returns a handle whose
+  `setMatrix(m)` takes a column-major rotation and translation.
+  `viewer.onFrame(callback)` drives the animation, and pauses it while
+  the view is off screen or the tab is hidden. A move only redraws; it
+  uploads nothing. The desktop apps draw exactly as before. A new view
+  setting, `background`, draws the page's own colours behind the model.
+- **The hero model has bodies.** `apple/Icon/hero.scad` takes `body`
+  (`"sun"`, `"planet"` with `planet_index`, `"carrier"` or `"static"`),
+  each emitted in place, and echoes the tooth counts and pin positions,
+  so a live view can render the gearbox once and turn its parts.
+  `body = "all"`, the default, is the same model as before.
 
 ### Fixed
 

@@ -186,6 +186,8 @@ export interface ViewSettings {
   orthographic?: boolean;
   lighting?: string;
   scheme?: string;
+  /** The view's background instead of the scheme's: "#rrggbb", or [top, bottom] for a vertical gradient; null for the scheme's. WebGPU and WebGL only. */
+  background?: string | [string, string] | null;
 }
 
 export const DEFAULT_VIEW: Required<ViewSettings>;
@@ -206,13 +208,55 @@ export interface ViewerOptions {
 
 export type Preset = "top" | "bottom" | "left" | "right" | "front" | "back" | "diagonal";
 
+/** 16 numbers, column-major (WebGL's order; `DOMMatrix` works too): a rotation and a translation only. */
+export type SceneMatrix = ArrayLike<number> | DOMMatrixReadOnly;
+
+/** A scene shown with `viewer.addScene`. */
+export class SceneHandle {
+  readonly id: number;
+  /** True once removed, or once `setMatrix` found the scene gone (`setScene` replaced it). */
+  readonly removed: boolean;
+  /** Move the scene; only redraws, so it may be called every frame. False once the scene is gone. Throws on a scale, shear or mirror. */
+  setMatrix(matrix: SceneMatrix): boolean;
+  /** Take the scene away. Whether it was still shown. */
+  remove(): boolean;
+}
+
+/** `viewer.onFrame`'s loop: runs while the canvas is on screen and the tab is visible. */
+export interface FrameLoop {
+  pause(): void;
+  play(): void;
+  stop(): void;
+  /** Paused by the page (not merely off screen). */
+  readonly paused: boolean;
+  /** Delivering frames now. */
+  readonly running: boolean;
+  /** Milliseconds of running time so far. */
+  readonly time: number;
+}
+
 export class Viewer {
   readonly kind: "webgpu" | "webgl" | "canvas2d";
   /** Shown over the view when it fell back to canvas2d, else null. */
   readonly notice: string | null;
   readonly canvas: HTMLCanvasElement;
   readonly schemes: string[];
+  /** Show one scene (null: none), removing any added with `addScene`. */
   setScene(scene: PackedScene | null): void;
+  /** Whether `addScene` works (false on the canvas2d fallback). */
+  readonly supportsTransforms: boolean;
+  /**
+   * Show `scene` beside the others, moved by `matrix` (identity by default).
+   * View All fits every scene where it is now. Throws when `supportsTransforms` is false, and on a
+   * preview with image-space CSG (a difference or an intersection): use `render` mode.
+   */
+  addScene(scene: PackedScene, options?: { matrix?: SceneMatrix }): SceneHandle;
+  /**
+   * `callback(timeMs, stepMs)` on each animation frame while the canvas is on
+   * screen and the tab visible. `timeMs` counts running time only (a step is at
+   * most 100 ms), so an animation resumes where it paused. `dispose()` stops it.
+   */
+  onFrame(callback: (timeMs: number, stepMs: number) => void): FrameLoop;
   setSettings(settings: ViewSettings): void;
   preset(name: Preset): void;
   viewAll(): void;

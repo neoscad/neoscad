@@ -70,6 +70,44 @@ const { data } = await engine.export(source, "binstl");   // a Uint8Array
 `render()` takes the options of `createEngine`, `createViewer` and
 `run`. Pass an `AbortSignal` as `signal` to cancel a run.
 
+## Moving parts: several scenes
+
+A viewer can show several scenes at once and move each one rigidly,
+without running the model again. Render each moving part as a model of
+its own (`render` mode), add each with `addScene`, and change its matrix
+on every frame. Moving a scene only redraws: nothing is uploaded again.
+
+```js
+import { createEngine, createViewer } from "@neoscad/viewer";
+
+const engine = createEngine();
+const viewer = await createViewer(document.getElementById("model"));
+if (viewer.supportsTransforms) {
+  const base = await engine.run(source, { mode: "render", overrides: { body: "base" } });
+  const arm = await engine.run(source, { mode: "render", overrides: { body: "arm" } });
+  viewer.addScene(base.scene);
+  const handle = viewer.addScene(arm.scene);
+  viewer.onFrame((ms) => handle.setMatrix(new DOMMatrix().rotate(0, 0, ms / 20)));
+}
+```
+
+- A matrix is 16 numbers in column-major order (WebGL's order;
+  a `DOMMatrix` works too), with a rotation and a translation only. A
+  scale, a shear or a mirror throws.
+- `onFrame(callback)` runs while the canvas is on screen and the tab is
+  visible. The time it passes counts running time only, so an animation
+  resumes where it stopped. It returns `{pause(), play(), stop()}`.
+- `setScene` replaces every added scene with one. View All fits the
+  scenes where they are now.
+- The canvas2d fallback (no WebGPU, no WebGL 2) cannot place scenes.
+  `viewer.supportsTransforms` is then false and `addScene` throws, so
+  show something else, such as a still image.
+- A preview of a difference or an intersection cannot be added: run the
+  model in `render` mode.
+- To match the page around the view (a still image it replaces, say),
+  set `settings: { background: ["#23264a", "#07080f"] }` (top and
+  bottom of a gradient, or one colour) and `axes: false`.
+
 ## Serving the assets
 
 The assets are about 16 MB, in `dist/assets/`: the core in `core/`, the
