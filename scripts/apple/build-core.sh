@@ -142,9 +142,18 @@ fi
 # watch them would rebuild whenever the core is built from Xcode after the
 # command line or the other way round. The deployment target is the
 # app's, so the linker does not warn that the library needs a newer macOS.
+#
+# The PATH keeps the directory of the cargo the caller would run (and
+# $CARGO_HOME/bin): rustup is not always in ~/.cargo/bin (GitHub's macOS
+# images from 2026-11 install it elsewhere), and Xcode's PATH may lack it.
+cargo_path="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+if [ -n "${CARGO_HOME:-}" ]; then cargo_path="$CARGO_HOME/bin:$cargo_path"; fi
+if cargo_bin=$(command -v cargo 2>/dev/null) && [ -n "$cargo_bin" ]; then
+    cargo_path="$(dirname "$cargo_bin"):$cargo_path"
+fi
 cargo_env=(env -i
     HOME="$HOME"
-    PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+    PATH="$cargo_path"
     MACOSX_DEPLOYMENT_TARGET=15.0
     TERM="${TERM:-dumb}")
 if [ -n "${RUSTUP_HOME:-}" ]; then cargo_env+=(RUSTUP_HOME="$RUSTUP_HOME"); fi
