@@ -21,6 +21,21 @@
 //! (the camera, the model, the size or the options): [`Viewport::needs_draw`]
 //! says whether it would.
 //!
+//! # Several models
+//!
+//! [`Viewport::set_model`] shows one model, as the apps do. A host that
+//! moves parts without re-evaluating (a web page animating a mechanism)
+//! adds each part as a model of its own with [`Viewport::add_model`] and
+//! moves it with [`Viewport::set_placement`], a rigid transform
+//! ([`crate::placement`]). Moving a model marks the view dirty and nothing
+//! else: the next frame rewrites that model's uniforms and re-encodes the
+//! pass, with no upload. While no model has been added, frames are drawn
+//! exactly as before ([`Renderer::draw`]); with added models they go
+//! through [`Renderer::draw_placed`]. View All fits every model at its
+//! current placement. A scene with image-space CSG products (a preview of
+//! a difference or an intersection) cannot be one of several models (see
+//! [`NotPlaceable`]).
+//!
 //! # Antialiasing
 //!
 //! A surface or texture attached here is drawn with [`MSAA_SAMPLES`]
@@ -33,10 +48,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Lighting;
 use crate::camera::{BoundingBox, Camera, Projection};
-use crate::gpu::{DEPTH_FORMAT, FrameParams, PackedUploadError, Renderer, SceneBuffers};
+use crate::gpu::{
+    DEPTH_FORMAT, FrameBinding, FrameParams, PackedUploadError, PlacedScene, Renderer, SceneBuffers,
+};
 use crate::offscreen::{Error, Gate, Readback};
 use crate::overlay::{self, ViewOptions};
 use crate::packed::PackedScene;
+use crate::placement::{self, Placement};
 use crate::scene::Scene;
 use crate::scheme::ColorScheme;
 use crate::{Image, snapshot};
@@ -258,6 +276,42 @@ impl Model {
     pub fn bounding_box(&self) -> BoundingBox {
         self.bbox
     }
+
+    /// Whether the scene has image-space CSG products (a preview of a
+    /// difference or an intersection), which only a model shown alone
+    /// can draw.
+    pub fn has_image_csg(&self) -> bool {
+        self.buffers.has_image_csg()
+    }
+}
+
+/// Why [`Viewport::add_model`] refused a model: it, or the model already
+/// shown with [`Viewport::set_model`], has image-space CSG products. Each
+/// such product is drawn in a render pass of its own into buffers of its
+/// own, merged by depth into the frame; doing that per placed model is
+/// not worth it for what several models are for (moving rendered parts).
+/// Render the model (`render` mode builds the mesh, which has none), or
+/// show it alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotPlaceable;
+
+impl std::fmt::Display for NotPlaceable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "a preview with image-space CSG (a difference or intersection) can only be \
+             shown alone; render it, or show it with setModel",
+        )
+    }
+}
+
+impl std::error::Error for NotPlaceable {}
+
+/// A model added with [`Viewport::add_model`], and where it sits.
+#[derive(Debug, Clone)]
+struct Placed {
+    id: u64,
+    model: Arc<Model>,
+    placement: Placement,
 }
 
 /// What the app's View menu toggles besides the camera.
@@ -476,6 +530,9 @@ struct Attached {
     /// Whether `msaa` and `depth` keep their contents between render
     /// passes (see [`Viewport::make_buffers`]).
     stored: bool,
+    /// The uniforms [`Renderer::draw_placed`] rewrites each frame, made
+    /// with `renderer` (so a new target starts a new set).
+    bindings: Mutex<Vec<FrameBinding>>,
 }
 
 /// One interactive view (see the module documentation).
@@ -491,6 +548,10 @@ pub struct Viewport {
     settings: ViewSettings,
     scheme: ColorScheme,
     model: Option<Arc<Model>>,
+    /// The models added with [`Viewport::add_model`], in the order added,
+    /// drawn after `model`.
+    placed: Vec<Placed>,
+    next_placed: u64,
     annotations: Annotations,
     /// What an empty view draws (no faces, no outlines).
     empty: SceneBuffers,
@@ -531,6 +592,8 @@ impl Viewport {
             settings: ViewSettings::default(),
             scheme,
             model: None,
+            placed: Vec::new(),
+            next_placed: 1,
             annotations: Annotations::default(),
             empty,
             generation: 0,
@@ -632,6 +695,7 @@ impl Viewport {
             msaa: None,
             depth: None,
             stored: false,
+            bindings: Mutex::new(Vec::new()),
         });
         self.resize(width, height, scale);
         Ok(())
@@ -652,6 +716,7 @@ impl Viewport {
             msaa: None,
             depth: None,
             stored: false,
+            bindings: Mutex::new(Vec::new()),
         });
         self.resize(width, height, scale);
     }
@@ -810,6 +875,7 @@ impl Viewport {
             self.fitted = true;
         }
         self.model = Some(model);
+        self.placed.clear();
         self.match_buffers_to_model();
         self.dirty = true;
         true
@@ -856,15 +922,83 @@ impl Viewport {
         &self.annotations
     }
 
-    /// Show nothing (keeping the camera).
+    /// Show nothing (keeping the camera): the model and every added one.
     pub fn clear_model(&mut self) {
         self.model = None;
+        self.placed.clear();
         self.match_buffers_to_model();
         self.dirty = true;
     }
 
+    /// The model shown with [`Viewport::set_model`] (not the added ones).
     pub fn model(&self) -> Option<&Arc<Model>> {
         self.model.as_ref()
+    }
+
+    /// Show `model` as well as those already shown, at the identity
+    /// placement, until [`Viewport::remove_model`], [`Viewport::set_model`]
+    /// or [`Viewport::clear_model`]. Its id (never 0, never reused by this
+    /// viewport) moves it with [`Viewport::set_placement`]. The first
+    /// model of an unfitted view is fitted, as with `set_model`.
+    pub fn add_model(&mut self, model: Arc<Model>) -> Result<u64, NotPlaceable> {
+        if model.has_image_csg() || self.model.as_ref().is_some_and(|m| m.has_image_csg()) {
+            return Err(NotPlaceable);
+        }
+        let id = self.next_placed;
+        self.next_placed += 1;
+        self.placed.push(Placed {
+            id,
+            model,
+            placement: Placement::IDENTITY,
+        });
+        if !self.fitted && self.bounds().is_some() {
+            self.fit(self.bounds());
+            self.fitted = true;
+        }
+        self.dirty = true;
+        Ok(id)
+    }
+
+    /// Place the added model `id` (the view keeps its camera). Whether
+    /// there is such a model.
+    pub fn set_placement(&mut self, id: u64, placement: Placement) -> bool {
+        let Some(p) = self.placed.iter_mut().find(|p| p.id == id) else {
+            return false;
+        };
+        if p.placement != placement {
+            p.placement = placement;
+            self.dirty = true;
+        }
+        true
+    }
+
+    /// Where the added model `id` sits, if there is one.
+    pub fn placement(&self, id: u64) -> Option<Placement> {
+        self.placed.iter().find(|p| p.id == id).map(|p| p.placement)
+    }
+
+    /// Stop showing the added model `id`. Whether there was one.
+    pub fn remove_model(&mut self, id: u64) -> bool {
+        let before = self.placed.len();
+        self.placed.retain(|p| p.id != id);
+        let removed = self.placed.len() != before;
+        self.dirty |= removed;
+        removed
+    }
+
+    /// The ids of the added models, in drawing order.
+    pub fn added_models(&self) -> impl Iterator<Item = u64> + '_ {
+        self.placed.iter().map(|p| p.id)
+    }
+
+    /// The box around everything shown: the model, and every added model
+    /// at its current placement (the box of its own box's moved corners).
+    pub fn bounds(&self) -> BoundingBox {
+        self.placed
+            .iter()
+            .fold(self.model.as_ref().and_then(|m| m.bbox), |acc, p| {
+                placement::union(acc, p.placement.bounds(p.model.bbox))
+            })
     }
 
     // --- Settings -----------------------------------------------------------
@@ -943,11 +1077,11 @@ impl Viewport {
         self.with_camera(|c| c.pan(dx, dy, w, h));
     }
 
-    /// View > View All: fit the model shown (or the default distance for
-    /// none), in both directions of the view.
+    /// View > View All: fit the models shown, the added ones where they
+    /// are now ([`Viewport::bounds`]), or the default distance for none,
+    /// in both directions of the view.
     pub fn view_all(&mut self) {
-        let bbox = self.model.as_ref().and_then(|m| m.bbox);
-        self.fit(bbox);
+        self.fit(self.bounds());
     }
 
     /// A standard view: OpenSCAD's rotation for it, keeping the centre and
@@ -999,6 +1133,7 @@ impl Viewport {
             ..self.settings
         };
         v.model = self.model.clone();
+        v.placed = self.placed.clone();
         v.fitted = true;
         Ok(v)
     }
@@ -1022,6 +1157,7 @@ impl Viewport {
         v.camera = self.camera;
         v.settings = self.settings;
         v.model = self.model.clone();
+        v.placed = self.placed.clone();
         v.annotations = self.annotations.clone();
         v.fitted = true;
         Ok(v)
@@ -1228,6 +1364,35 @@ impl Viewport {
             // to draw into.
             return encoder;
         };
+        if !self.placed.is_empty() {
+            let models: Vec<PlacedScene<'_>> = self
+                .model
+                .iter()
+                .map(|m| PlacedScene {
+                    buffers: &m.buffers,
+                    placement: &Placement::IDENTITY,
+                })
+                .chain(self.placed.iter().map(|p| PlacedScene {
+                    buffers: &p.model.buffers,
+                    placement: &p.placement,
+                }))
+                .collect();
+            let mut bindings = a.bindings.lock().unwrap_or_else(PoisonError::into_inner);
+            a.renderer.draw_placed(
+                device,
+                &self.gpu.queue,
+                &mut encoder,
+                color,
+                resolve,
+                depth,
+                &models,
+                &mut bindings,
+                &frame,
+                &lines,
+            );
+            drop(bindings);
+            return encoder;
+        }
         a.renderer.draw(
             device,
             &mut encoder,

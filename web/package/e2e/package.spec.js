@@ -1,6 +1,7 @@
 // The built package in a browser, as a third-party page uses it: render()
 // self-hosted and from another origin (the blob: worker), the custom
-// element ten at a time, export, abort, and an app that bundled it.
+// element ten at a time, export, abort, an app that bundled it, and
+// several scenes in one viewer, one of them moved.
 //
 // Against the mock build (CI) the engine is the demo's mock core and the
 // viewer the canvas2d fallback (the mock build ships no viewer); with
@@ -195,5 +196,92 @@ test("an app that bundled the package and passes assetsUrl", async ({ page }) =>
   expect(app.assets).toMatch(/\/pkg\/dist\/assets\/$/);
   expect(app.version).not.toBe("dev");
   if (REAL) expect(app.bbox).toEqual({ min: [0, 0, 0], max: [4, 6, 8] });
+  expect(problems).toEqual([]);
+});
+
+test("several scenes in one viewer: the moved one's pixels move, the other's stay", async ({ page }) => {
+  const problems = await open(page, "/index.html");
+  const r = await page.evaluate(async () => {
+    const viewer = await NS.createViewer(document.getElementById("view"), { settings: { axes: false } });
+    const engine = NS.sharedEngine();
+    const a = await engine.run("cube(10);", { mode: "render" });
+    const b = await engine.run("translate([20, 0, 0]) cube(10);", { mode: "render" });
+    if (!viewer.supportsTransforms) {
+      let refused = false;
+      try {
+        viewer.addScene(a.scene);
+      } catch {
+        refused = true;
+      }
+      return { kind: viewer.kind, supports: false, refused };
+    }
+    // From the top: x to the right, y up; the cubes are left and right of
+    // the centre, x = 15.
+    viewer.setFileView({ vpt: [15, 5, 5], vpr: [0, 0, 0], vpd: 120 });
+    viewer.addScene(a.scene);
+    const right = viewer.addScene(b.scene);
+    const pixels = async () => {
+      const bitmap = await createImageBitmap(await viewer.image(200, 100));
+      const c = document.createElement("canvas");
+      c.width = 200;
+      c.height = 100;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0);
+      return ctx.getImageData(0, 0, 200, 100).data;
+    };
+    const changed = (p, q, x0, x1) => {
+      let n = 0;
+      for (let y = 0; y < 100; y++)
+        for (let x = x0; x < x1; x++) {
+          const i = (y * 200 + x) * 4;
+          if (Math.abs(p[i] - q[i]) + Math.abs(p[i + 1] - q[i + 1]) + Math.abs(p[i + 2] - q[i + 2]) > 30) n++;
+        }
+      return n;
+    };
+    const both = await pixels();
+    // Down by 12 (y), as a column-major matrix.
+    const moved = right.setMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -12, 0, 1]);
+    const after = await pixels();
+    let threw = null;
+    try {
+      right.setMatrix([2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]);
+    } catch (e) {
+      threw = String(e.message ?? e);
+    }
+    const removed = right.remove();
+    const alone = await pixels();
+    // The page's own background, for a view that stands in for a still.
+    viewer.setSettings({ background: ["#204080", "#204080"] });
+    const bg = Array.from((await pixels()).slice(0, 3));
+    return {
+      bg,
+      kind: viewer.kind,
+      supports: true,
+      moved,
+      left: changed(both, after, 0, 95),
+      right: changed(both, after, 105, 200),
+      gone: changed(both, alone, 105, 200),
+      leftAlone: changed(both, alone, 0, 95),
+      threw,
+      removed,
+      again: right.setMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+    };
+  });
+  console.log(`  viewer: ${r.kind}; transforms: ${r.supports}`);
+  if (!REAL) {
+    // The mock build has only the canvas2d view, which places nothing.
+    expect(r).toMatchObject({ kind: "canvas2d", supports: false, refused: true });
+    return;
+  }
+  expect(r.supports).toBe(true);
+  expect(r.moved).toBe(true);
+  expect(r.left).toBe(0);
+  expect(r.right).toBeGreaterThan(200);
+  expect(r.gone).toBeGreaterThan(200);
+  expect(r.leftAlone).toBe(0);
+  expect(r.threw).toMatch(/rotation and a translation/);
+  expect(r.removed).toBe(true);
+  expect(r.again).toBe(false);
+  expect(r.bg).toEqual([0x20, 0x40, 0x80]);
   expect(problems).toEqual([]);
 });

@@ -71,7 +71,19 @@ const viewer = await createViewer(target, { assetsUrl, backend, settings });
 viewer.setScene(r.scene); viewer.preset("top"); viewer.viewAll(); viewer.resetView();
 viewer.camera(); viewer.setFileView(r.fileView); viewer.setSettings({ edges: true });
 viewer.image(w, h, { type }) /* Blob */; viewer.kind; viewer.notice; viewer.dispose();
+
+viewer.supportsTransforms;                          // false on the canvas2d fallback
+const part = viewer.addScene(r.scene, { matrix }); // beside the others
+part.setMatrix(matrix); part.remove();              // 16 numbers, column-major, rigid
+const loop = viewer.onFrame((ms, step) => ...);    // loop.pause(), play(), stop()
 ```
+
+A setting the demo does not use, `background` (`"#rrggbb"`, or `[top,
+bottom]` for a vertical gradient; `null` for the scheme's), draws the
+view's background in the page's colours instead of the colour scheme's
+(`Viewer.setBackground` in `crates/web-view`). A view that stands in for
+an image, such as neoscad.org's hero over its still, needs it to fade in
+without a seam. The canvas2d fallback ignores it.
 
 Run options are `mode` ("preview" | "render"), `enable` (extension
 names; `part` becomes the wire's `parts`), `overrides` (plain JS values,
@@ -171,6 +183,58 @@ Otherwise it can self-host the assets or pass `worker`, which must
 return a new worker on every call. When no worker ever answers `init`,
 the client gives up after a burst of restarts, and the engine's error
 names the worker URL, CORS and the CSP.
+
+## Several scenes in one viewer
+
+A packed scene has no object identity: its draws are grouped by render
+state (`docs/web-protocol.md`, PackedScene), so a viewer cannot move one
+object inside it. To animate a mechanism without evaluating it per frame,
+a page renders each rigid part as a scene of its own and places each one:
+`addScene` returns a handle, and `handle.setMatrix(m)` moves the scene.
+
+- **The viewer.** `crates/web-view` has `addModel(faces, edges, meta) ->
+  id`, `setModelTransform(id, Float32Array)` and `removeModel(id)`.
+  `setModel` and `clearModel` keep their meaning: they replace all the
+  models with one, or with none. The models live in `render::viewport`
+  (`Viewport::add_model`, `set_placement`, `remove_model`), so the
+  bookkeeping and the drawing are tested natively, on the machine's GPU
+  (`crates/render/tests/viewport.rs`).
+- **The transform.** `render::placement::Placement` is rigid only: a
+  rotation and a translation, checked to 1e-3 (f32 matrices composed in
+  JavaScript pass). Each model's matrix is folded into its own copy of
+  the frame uniforms, with `clip_from_model` times the matrix and the
+  normal matrix times its rotation. A rotation's inverse transpose is
+  itself, so the rotation carries the normals. A scale or shear would need
+  the true inverse transpose, and a mirror would flip the winding that
+  face culling relies on, so both are refused. The shader is unchanged.
+- **Drawing.** While no model has been added, frames go through
+  `Renderer::draw` exactly as before; the desktop apps never add one.
+  With added models, `Renderer::draw_placed` draws them all in one pass,
+  in the same order as a single scene (background, lines under, every
+  model's faces, every model's outlines, lines behind and over). A model
+  at the identity gives the same pixels as the same model shown with
+  `setModel`, and a test checks this. The uniform buffers are kept per
+  target and rewritten with `queue.write_buffer`, so moving a model
+  uploads nothing and makes no uniform buffer. A move marks the view dirty, and
+  the page's next animation frame draws once.
+- **Bounds.** View All, and the first fit, use every model's box moved by
+  its current matrix (the box of the eight moved corners).
+- **Image-space CSG.** A preview of a difference or an intersection draws
+  each CSG product in a pass of its own, into buffers of its own. Such a
+  scene cannot be added, and nothing can be added beside one shown with
+  `setModel` (`NotPlaceable`). Render mode has no such products.
+- **Picking.** `rayAt` gives a ray in the view's coordinates. The
+  engine's picking knows only the scene as it was built, at the
+  identity, so for a moved scene the caller must carry the ray into the
+  scene's own coordinates by the inverse matrix. The package does not
+  pick.
+- **The canvas2d fallback** does not place scenes: `supportsTransforms`
+  is false and `addScene` throws. A page then shows something else, as
+  neoscad.org's hero keeps its still image.
+- **`onFrame`** (`src/frames.js`) is a `requestAnimationFrame` loop that
+  stops while the canvas is off screen (IntersectionObserver) or the tab
+  is hidden. Its clock counts running time only, with steps capped at
+  100 ms, so an animation resumes where it stopped.
 
 ## Many elements
 

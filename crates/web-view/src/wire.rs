@@ -164,6 +164,26 @@ impl AnnotationSet {
     }
 }
 
+/// A CSS colour `#rrggbb` or `#rgb` as `[r, g, b, 1]` from 0 to 1, as a
+/// colour scheme's are (the view writes them to the canvas unconverted, so
+/// `#23264a` on the page and in the view is the same pixel). `None` for
+/// anything else: a background the page got wrong is refused rather than
+/// drawn magenta.
+pub fn css_hex(s: &str) -> Option<[f32; 4]> {
+    let hex = s.trim().strip_prefix('#')?;
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let full: String = match hex.len() {
+        3 => hex.chars().flat_map(|c| [c, c]).collect(),
+        6 => hex.to_string(),
+        _ => return None,
+    };
+    let n = u32::from_str_radix(&full, 16).ok()?;
+    let channel = |shift: u32| f32::from(((n >> shift) & 0xff) as u8) / 255.0;
+    Some([channel(16), channel(8), channel(0), 1.0])
+}
+
 /// A ray into the scene (`PickRay`): origin and unit direction in model
 /// coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -203,6 +223,20 @@ mod tests {
         let bad: AnnotationSet =
             serde_json::from_str(r#"{"markers": [{"point": [0,0,0], "color": []}]}"#).unwrap();
         assert_eq!(bad.annotations().markers[0].color, [1.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn backgrounds_are_css_hex_colours() {
+        assert_eq!(css_hex("#ff0000"), Some([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(css_hex(" #0f0 "), Some([0.0, 1.0, 0.0, 1.0]));
+        // The same f32 a scheme file's `#23264a` gives (`Color::from_u8`).
+        assert_eq!(
+            css_hex("#23264a"),
+            Some([35.0 / 255.0, 38.0 / 255.0, 74.0 / 255.0, 1.0])
+        );
+        for bad in ["", "#", "red", "#12345", "#1234567", "#ggg", "23264a"] {
+            assert_eq!(css_hex(bad), None, "{bad}");
+        }
     }
 
     #[test]

@@ -31,6 +31,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::{self, Camera};
 use crate::overlay::{LINE_VERTEX_SIZE, LineVertex, Overlay};
 use crate::packed::{InvalidPacked, PackedScene};
+use crate::placement::Placement;
 use crate::scene::{
     CsgOp, Cull, Depth, Draw, DrawState, EDGE_SEGMENT_SIZE, FACE_VERTEX_SIZE, ImageCsgDraws, Scene,
 };
@@ -278,6 +279,18 @@ impl FrameParams {
         FrameParams { lighting, ..self }
     }
 
+    /// The same frame for a model placed by `placement`: the transform
+    /// folded into the model's matrix and its rotation into the normal
+    /// matrix. Everything else (lighting, which is in eye space, the
+    /// crosshairs' and small axes' frames, the size) is the view's.
+    pub fn placed(self, placement: &Placement) -> FrameParams {
+        FrameParams {
+            clip_from_model: placement.after(&self.clip_from_model),
+            normal_matrix: placement.normals_after(&self.normal_matrix),
+            ..self
+        }
+    }
+
     /// The `Frame` uniform block, column-major as WGSL matrices are.
     fn bytes(&self, edge_color: [f32; 4]) -> [u8; FRAME_SIZE] {
         let mut f: Vec<f32> = Vec::with_capacity(FRAME_SIZE / 4);
@@ -349,6 +362,23 @@ pub struct Renderer {
     /// a product, and its buffers at the last size drawn.
     csg: OnceLock<CsgPipelines>,
     csg_targets: Mutex<Option<Arc<CsgTargets>>>,
+}
+
+/// A `Frame` uniform buffer and its bind group, kept from frame to frame
+/// by a caller drawing several placed models ([`Renderer::draw_placed`]),
+/// which rewrites it in place rather than making a buffer per model per
+/// frame. Bound only with the [`Renderer`] that made it.
+#[derive(Debug)]
+pub struct FrameBinding {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+/// One model of several in a frame: its buffers and where it sits.
+#[derive(Debug, Clone, Copy)]
+pub struct PlacedScene<'a> {
+    pub buffers: &'a SceneBuffers,
+    pub placement: &'a Placement,
 }
 
 /// glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), which GL applies to
@@ -786,6 +816,170 @@ impl Renderer {
                 pass.set_vertex_buffer(0, a.slice(..));
                 pass.draw(0..after_v.len() as u32, 0..1);
             }
+        }
+    }
+
+    /// A uniform buffer and bind group for [`Renderer::draw_placed`].
+    pub fn frame_binding(&self, device: &wgpu::Device) -> FrameBinding {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("neoscad placed frame"),
+            size: FRAME_SIZE as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("neoscad placed frame"),
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        FrameBinding { buffer, bind_group }
+    }
+
+    /// Record one frame of several models, each at its own placement: the
+    /// [`Renderer::draw`] of a scene that is their union, in the same
+    /// order (background, the lines under the models, every model's
+    /// faces, every model's 2D outlines, the lines behind and over), in
+    /// one render pass.
+    ///
+    /// `bindings` holds the frame's uniforms: the first for the view
+    /// itself, then one per model. It grows to `1 + models.len()` and its
+    /// buffers are rewritten through `queue` (written before the encoder
+    /// is submitted, which is when the writes land), so a frame that only
+    /// moved models makes no uniform buffer (the view-option lines, when
+    /// shown, are made per frame as in `draw`). The caller keeps it for
+    /// this renderer and submits each frame before encoding the next.
+    ///
+    /// A model with image-space CSG products ([`SceneBuffers::has_image_csg`])
+    /// is not drawn: its products need a pass split per product, with
+    /// buffers of their own, which a list of models does not have. Callers
+    /// refuse such scenes before they get here (`Viewport::add_model`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_placed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        color: &wgpu::TextureView,
+        resolve: Option<&wgpu::TextureView>,
+        depth: &wgpu::TextureView,
+        models: &[PlacedScene<'_>],
+        bindings: &mut Vec<FrameBinding>,
+        frame: &FrameParams,
+        overlay: &Overlay,
+    ) {
+        while bindings.len() < models.len() + 1 {
+            bindings.push(self.frame_binding(device));
+        }
+        let models: Vec<&PlacedScene<'_>> = models
+            .iter()
+            .filter(|m| !m.buffers.has_image_csg())
+            .collect();
+        // The view's own frame: the outline colour is the first model's,
+        // as a single scene's would be (the lines do not use it).
+        let view_edge = models.first().map_or([0.0; 4], |m| m.buffers.edge_color);
+        queue.write_buffer(&bindings[0].buffer, 0, &frame.bytes(view_edge));
+        for (m, b) in models.iter().zip(&bindings[1..]) {
+            let placed = frame.placed(m.placement);
+            queue.write_buffer(&b.buffer, 0, &placed.bytes(m.buffers.edge_color));
+        }
+        let lines = |v: &[LineVertex]| {
+            mapped_buffer(
+                device,
+                "neoscad lines",
+                v.len(),
+                v.iter().map(LineVertex::bytes),
+            )
+        };
+        let clip = |v: &[LineVertex]| crate::overlay::clip_to_view(v, &frame.clip_from_model);
+        let (before_v, behind_v, after_v) = (
+            clip(&overlay.before),
+            clip(&overlay.behind),
+            clip(&overlay.after),
+        );
+        let (before, behind, after) = (lines(&before_v), lines(&behind_v), lines(&after_v));
+        let behind_pipeline = behind.as_ref().map(|_| self.lines_behind());
+        let pipelines: Vec<Vec<(Draw, Arc<wgpu::RenderPipeline>)>> = models
+            .iter()
+            .map(|m| {
+                m.buffers
+                    .draws
+                    .iter()
+                    .map(|d| (*d, self.faces(d.state)))
+                    .collect()
+            })
+            .collect();
+        let [r, g, b, _] = frame.background_top.map(f64::from);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("neoscad frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color,
+                depth_slice: None,
+                resolve_target: resolve,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
+                    store: if resolve.is_some() {
+                        wgpu::StoreOp::Discard
+                    } else {
+                        wgpu::StoreOp::Store
+                    },
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let view_group = &bindings[0].bind_group;
+        pass.set_bind_group(0, view_group, &[]);
+        if frame.background_top != frame.background_bottom {
+            pass.set_pipeline(&self.background);
+            pass.draw(0..6, 0..1);
+        }
+        if let Some(b) = &before {
+            pass.set_pipeline(&self.lines_tested);
+            pass.set_vertex_buffer(0, b.slice(..));
+            pass.draw(0..before_v.len() as u32, 0..1);
+        }
+        for ((m, b), draws) in models.iter().zip(&bindings[1..]).zip(&pipelines) {
+            let Some(faces) = &m.buffers.faces else {
+                continue;
+            };
+            pass.set_bind_group(0, &b.bind_group, &[]);
+            pass.set_vertex_buffer(0, faces.slice(..));
+            for (d, p) in draws {
+                pass.set_pipeline(p);
+                pass.draw(d.first..d.first + d.count, 0..1);
+            }
+        }
+        for (m, b) in models.iter().zip(&bindings[1..]) {
+            let Some(edges) = &m.buffers.edges else {
+                continue;
+            };
+            pass.set_bind_group(0, &b.bind_group, &[]);
+            pass.set_pipeline(&self.edges);
+            pass.set_vertex_buffer(0, edges.slice(..));
+            pass.draw(0..6, 0..m.buffers.edge_segments);
+        }
+        pass.set_bind_group(0, view_group, &[]);
+        if let (Some(b), Some(p)) = (&behind, behind_pipeline) {
+            pass.set_pipeline(p);
+            pass.set_vertex_buffer(0, b.slice(..));
+            pass.draw(0..behind_v.len() as u32, 0..1);
+        }
+        if let Some(a) = &after {
+            pass.set_pipeline(&self.lines_over);
+            pass.set_vertex_buffer(0, a.slice(..));
+            pass.draw(0..after_v.len() as u32, 0..1);
         }
     }
 

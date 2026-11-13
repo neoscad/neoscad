@@ -12,12 +12,26 @@
 // Animated by $t (scripts/apple/build-hero-video.sh renders the frames);
 // at the default $t = 0 every rotation below is zero and the model is
 // the still that build-hero.sh times.
+//
+// `body` picks one rigid body for a live view that moves the bodies
+// itself instead of re-evaluating per frame (neoscad.org's hero, through
+// @neoscad/viewer): "sun", "planet" (with `planet_index`), "carrier"
+// (plate and pins) or "static" (ring with its cutaway, and the plinth).
+// Each is emitted in place at its $t = 0 pose, so the five kinds at
+// identity transforms are exactly "all". The live view runs another
+// mechanism than the video: the ring stays still (it is cut away, and a
+// rigid motion cannot turn it inside a fixed window) and the carrier
+// orbits. The numbers it needs come from the `hero_kinematics` echo
+// below, so the page never repeats this file's constants.
 
 include <BOSL2/std.scad>
 include <BOSL2/gears.scad>
 include <BOSL2/isosurface.scad>
 
 $fn = 96;
+
+body = "all";       // [all, sun, planet, carrier, static]
+planet_index = 0;   // which planet, for body = "planet"
 
 mod = 2;
 helical = 24;
@@ -27,6 +41,18 @@ g = planetary_gears(mod = mod, n = 4, max_teeth = 72, sun_ring = 3.5, helical = 
 sun = g[0];
 ring = g[1];
 planets = g[2];
+
+assert(in_list(body, ["all", "sun", "planet", "carrier", "static"]),
+       str("hero.scad: unknown body ", body));
+assert(body != "planet" || (is_int(planet_index) && planet_index >= 0 && planet_index < len(planets[4])),
+       str("hero.scad: planet_index must be 0 to ", len(planets[4]) - 1));
+function shown(b) = body == "all" || body == b;
+
+// For a live view that moves the bodies: [S, P, R, pins], the sun's,
+// a planet's and the ring's tooth counts and each planet's pin [x, y],
+// in the order of planet_index. JSON once the "ECHO: hero_kinematics = "
+// prefix is cut.
+echo(hero_kinematics = [sun[1], planets[1], ring[1], planets[4]]);
 
 // Motion: the carrier (with its pins), the plinth and the cutaway stay
 // still. The sun turns by `spin`; each planet turns about its own pin by
@@ -49,6 +75,7 @@ sun_turns = 25;
 spin = 360 * sun_turns * $t;
 
 // Sun: a herringbone gear on a hub, with a keyed bore.
+if (shown("sun"))
 color("#ff5a6e")
 zrot(spin)
 difference() {
@@ -64,6 +91,7 @@ difference() {
 // Planets: herringbone (opposite hand), each lightened by six round holes.
 color("#18b3cc")
 for (i = idx(planets[4]))
+    if (body == "all" || (body == "planet" && i == planet_index))
     move(planets[4][i])
     zrot(-spin * sun[1] / planets[1])
     difference() {
@@ -76,6 +104,7 @@ for (i = idx(planets[4]))
 // cut the icon concepts use), so the train inside is visible. The ring
 // turns inside the difference, so the window stays put while the teeth
 // run past it.
+if (shown("static"))
 color("#4b3fd1")
 difference() {
     zrot(-spin * sun[1] / ring[1])
@@ -98,6 +127,7 @@ function gyroid(p, w) = let(q = 360 / w * p)
     sin(q.x) * cos(q.y) + sin(q.y) * cos(q.z) + sin(q.z) * cos(q.x);
 rim = ring[1] * mod / 2 + 2 * mod + 7;
 base = 18;
+if (shown("static"))
 color("#7d86b8")
 down(thick / 2 + 6)
 difference() {
@@ -118,6 +148,7 @@ difference() {
 
 // Carrier: a plate below the gears, spoked, with a pin up through each
 // planet.
+if (shown("carrier"))
 color("#b8bfd6")
 down(thick / 2 + 1)
 difference() {
