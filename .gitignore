@@ -11,3 +11,8 @@ __pycache__/
 # dist/web) are covered above.
 web/test-results/
 web/playwright-report/
+# The npm package (web/package): build.mjs's output and Playwright's.
+web/package/build/
+web/package/build-mock/
+web/package/test-results/
+web/package/playwright-report/

@@ -1,0 +1,62 @@
+{
+  "name": "@neoscad/viewer",
+  "version": "0.0.0-dev",
+  "description": "Render OpenSCAD models in any web page with NeoSCAD's WebAssembly engine and viewer: an API and a <neoscad-viewer> element.",
+  "license": "GPL-2.0-or-later WITH Classpath-exception-2.0",
+  "homepage": "https://neoscad.org",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neoscad/neoscad.git",
+    "directory": "web/package"
+  },
+  "keywords": [
+    "openscad",
+    "neoscad",
+    "cad",
+    "3d",
+    "wasm",
+    "webgpu",
+    "web-component"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "./dist/element.js"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./element": {
+      "types": "./dist/element.d.ts",
+      "default": "./dist/element.js"
+    },
+    "./assets/*": "./dist/assets/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-LICENSES.txt",
+    "SOURCE.txt"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test test/*.test.js",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

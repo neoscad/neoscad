@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **NeoSCAD in any web page: `@neoscad/viewer`.** The new npm package
+  ships the wasm engine and viewer from the web demo. With
+  `<script type="module" src=".../dist/element.js">`, a
+  `<neoscad-viewer src="part.scad">` tag shows an interactive 3D view of
+  the model. `render(element, source)`, `createEngine()` and
+  `createViewer()` give the same from JavaScript, with the console,
+  errors and their positions, customizer values, extra files for
+  includes, and STL or 3MF export. It works from a CDN, self-hosted or
+  in a bundled app. All the elements on a page share one worker without
+  cancelling each other's runs, and an element gives its GPU context
+  back while it is off screen. The package is licensed
+  `GPL-2.0-or-later WITH Classpath-exception-2.0`, so a page that uses
+  it unmodified may license its own code as it likes
+  (`docs/js-package.md`, `web/package/README.md`). It is not published
+  to npm yet.
+
+### Fixed
+
+- **Several 3D views on one page.** Starting more than one web viewer at
+  the same moment could leave the first ones blank or on WebGL: the
+  viewer module was initialised twice.
+
 ## 0.7.0
 
 ### New

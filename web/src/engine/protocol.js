@@ -68,8 +68,9 @@ export const runOptions = (values, parts = false, enable = []) => ({ overrides: 
 export const Requests = {
   /// `seed` is the seed of unseeded `rands()`: the page keeps one across
   /// respawns, so a respawn does not change a model. Limits default to the
-  /// worker's (Limits::AGENT with 1 GiB of memory).
-  init: (seed) => ({ type: "init", seed }),
+  /// worker's (Limits::AGENT with 1 GiB of memory); a host that passes its
+  /// own `limits` (a ResourceLimits) has them replayed on every respawn.
+  init: (seed, limits = null) => (limits ? { type: "init", seed, limits } : { type: "init", seed }),
   defaults: () => ({ type: "defaults" }),
   stats: () => ({ type: "stats" }),
   open: (path, text) => ({ type: "open", path, text }),

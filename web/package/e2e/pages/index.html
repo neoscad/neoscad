@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>@neoscad/viewer e2e</title>
+<style>#view { width: 320px; height: 240px; }</style>
+</head>
+<body>
+<div id="view"></div>
+<script type="module">
+  // ?from=cdn imports the package from the other origin (as from jsDelivr),
+  // so its default assets are cross-origin and the worker starts from a
+  // blob: module; otherwise it is self-hosted at /pkg/.
+  const params = new URLSearchParams(location.search);
+  const base = params.get("from") === "cdn" ? `http://127.0.0.1:${params.get("cdn")}/pkg/` : "/pkg/";
+  window.NS = await import(`${base}dist/index.js`);
+  window.NS_READY = true;
+</script>
+</body>
+</html>

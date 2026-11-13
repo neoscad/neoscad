@@ -53,17 +53,27 @@ export const NO_3D =
 
 /// The viewer builds the bundle carries (build.json's `view`): "wasm" has
 /// ./view/ and ./view-webgl/; "none" has neither.
+///
+/// `backend` narrows what is tried, for a host that wants one (the npm
+/// package's `backend` option): "auto" (the default) tries WebGPU then
+/// WebGL2; "webgpu" or "webgl" tries only that one, and "canvas2d" none.
+/// Whatever fails still ends in the canvas fallback, with its notice.
 export async function createViewer(
   canvas,
-  { view = "none", base = import.meta.url, gpu = globalThis.navigator?.gpu, scheme = "Cornfield" } = {},
+  { view = "none", base = import.meta.url, gpu = globalThis.navigator?.gpu, scheme = "Cornfield", backend = "auto" } = {},
 ) {
   if (view !== "wasm") return { viewer: new Canvas2DViewer(canvas), canvas, notice: null };
   const errors = [];
-  const attempts = gpu ? [["view", "webgpu"], ["view-webgl", "webgl"]] : [["view-webgl", "webgl"]];
+  const attempts = (gpu ? [["view", "webgpu"], ["view-webgl", "webgl"]] : [["view-webgl", "webgl"]]).filter(
+    ([, b]) => backend === "auto" || backend === b,
+  );
+  if (backend === "canvas2d") return { viewer: new Canvas2DViewer(canvas), canvas, notice: null, errors };
   for (const [dir, backend] of attempts) {
     try {
-      const mod = await import(new URL(`./${dir}/web_view.js`, base).href);
-      await mod.default();
+      // A URL known only at run time: a bundler that sees this (an app
+      // bundling the npm package) must leave it alone, not try to bundle it.
+      const mod = await import(/* webpackIgnore: true */ /* @vite-ignore */ new URL(`./${dir}/web_view.js`, base).href);
+      await initOnce(mod);
       const v = await mod.Viewer.create(canvas, { backend, colorScheme: scheme });
       return { viewer: wrapWasm(mod, v, canvas), canvas, notice: null };
     } catch (e) {
@@ -75,6 +85,22 @@ export async function createViewer(
   // Why each backend failed is for the console (logged above), not the
   // notice: a reader can do nothing with wgpu's error text.
   return { viewer: new Canvas2DViewer(canvas), canvas, notice: NO_3D, errors };
+}
+
+/// wasm-bindgen's init for a viewer module, started once. Called again
+/// before the first has finished it instantiates a second wasm instance
+/// over the first one's bindings, and viewers made meanwhile never start:
+/// the page makes one viewer, but the npm package's elements make several
+/// at once.
+const inits = new WeakMap();
+function initOnce(mod) {
+  if (!inits.has(mod)) {
+    const p = mod.default();
+    // A failed init may be retried by the next viewer.
+    p.catch(() => inits.delete(mod));
+    inits.set(mod, p);
+  }
+  return inits.get(mod);
 }
 
 /// A copy of `canvas` in its place: a canvas keeps the first context type

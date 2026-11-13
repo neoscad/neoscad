@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>@neoscad/viewer elements e2e</title>
+<style>
+  neoscad-viewer { display: inline-block; width: 160px; height: 120px; margin: 2px; }
+  #far { display: block; margin-top: 3000px; }
+</style>
+</head>
+<body>
+<!-- Ten elements on screen, sharing one engine, one with an error and one
+     from a file; one more far below the fold, which runs only when it is
+     scrolled into view. -->
+<div id="grid"></div>
+<neoscad-viewer id="broken"><script type="text/x-openscad">
+  // mock:crash
+  cube(;
+</script></neoscad-viewer>
+<neoscad-viewer id="fromsrc" src="model.scad" edges></neoscad-viewer>
+<neoscad-viewer id="far"><script type="text/x-openscad">sphere(5);</script></neoscad-viewer>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const base = params.get("from") === "cdn" ? `http://127.0.0.1:${params.get("cdn")}/pkg/` : "/pkg/";
+  window.results = {};
+  window.errors = {};
+  document.addEventListener("neoscad-result", (e) => (window.results[e.target.id] = e.detail.ok), true);
+  document.addEventListener("neoscad-error", (e) => (window.errors[e.target.id] = e.detail.message), true);
+  const grid = document.getElementById("grid");
+  for (let i = 0; i < 8; i++) {
+    const el = document.createElement("neoscad-viewer");
+    el.id = `m${i}`;
+    if (i % 2) el.setAttribute("mode", "render");
+    const s = document.createElement("script");
+    s.type = "text/x-openscad";
+    s.textContent = `translate([${i}, 0, 0]) cube(${i + 2}, center = true);`;
+    el.append(s);
+    grid.append(el);
+  }
+  await import(`${base}dist/element.js`);
+  window.NS = await import(`${base}dist/index.js`);
+  window.NS_READY = true;
+</script>
+</body>
+</html>

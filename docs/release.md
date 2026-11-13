@@ -586,6 +586,37 @@ Homebrew formula, the shell and PowerShell installers, the MSIs, the
 `.deb`/`.rpm` packages and the container image all take the cargo-dist
 archives, so they get PGO where the archive has it.
 
+## The npm package
+
+`@neoscad/viewer` (`docs/js-package.md`) is built locally and published
+by the owner. No workflow publishes it. Its version is the workspace
+version, so build it from the release's tag, after the web core and
+viewers:
+
+    scripts/web/build-core.sh
+    scripts/web/build-view.sh --no-webgl --out dist/web-view/webgpu
+    scripts/web/build-view.sh --out dist/web-view/webgl
+    scripts/web/build-package.sh     # -> dist/npm/neoscad-viewer-<version>.tgz
+
+The script fails without the core, both viewers or `.reference/BOSL2`.
+It also fails if any file, binaries included, names a local path. It
+prints every file's size and the tarball's. Before publishing, run the
+real-engine e2e against the package directory:
+
+    cd web/package && E2E_PACKAGE_REAL=1 E2E_PKG_DIR=../../dist/npm/neoscad-viewer-<version> npx playwright test
+
+Then publish the tarball (the owner's step):
+
+    npm publish dist/npm/neoscad-viewer-<version>.tgz
+
+`access: public` (needed for a scoped package) already comes from the
+package's `publishConfig`, and npm will prompt for a 2FA code. The first
+time, create the `@neoscad` organization on npm. Publish a prerelease
+version (`0.8.0-rc.1`) with `--tag next`, so that `latest` stays on the
+last release. Once it is
+published, check that jsDelivr serves
+`https://cdn.jsdelivr.net/npm/@neoscad/viewer@<version>/dist/element.js`.
+
 ## The macOS app after the release
 
 Apple's notary queue took 75 to 80 minutes per submission for the new

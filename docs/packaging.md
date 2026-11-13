@@ -58,7 +58,7 @@ pushes), so every CI path is unverified until the first tag.
 | Chocolatey | Never, unless asked | OpenSCAD isn't there officially |
 | `cargo install` (crates.io) | Later, **blocked** | Fix 2. The name reservation is prepared at `packaging/crates-io-placeholder/` (`cargo package --list` checked; not published) |
 | `cargo binstall` | After fix 2 | binstall starts from the crate's crates.io metadata, so the placeholder alone does not make it work (unverified) |
-| npm (WASM) | With the web demo | Reserve `neoscad` and `@neoscad` |
+| npm (WASM) | **Prepared**, not published | `@neoscad/viewer`: the wasm engine and viewer for any web page, an API and a `<neoscad-viewer>` element (`docs/js-package.md`). `scripts/web/build-package.sh` packs `dist/npm/neoscad-viewer-<version>.tgz` (0.7.0: 7.7 MB, 16.1 MB unpacked); licensed `GPL-2.0-or-later WITH Classpath-exception-2.0`. The owner creates the `@neoscad` org on npm and publishes (`docs/release.md`, "The npm package"). Reserving the bare `neoscad` name is a separate step ("Name reservations" below) |
 | Docker (`ghcr.io`) | **Now** | `packaging/docker/Dockerfile` (debian-slim + Mesa lavapipe/llvmpipe, from the release archive). Built locally from a local binary (573 MB, most of it Mesa and LLVM) and rendered a PNG. In CI: `publish-packages.yml`, amd64 + arm64 |
 | Source + `cargo vendor` tarballs | **Now** | `scripts/release/source-tarballs.sh`; an offline build from the two tarballs passed in a `--network none` container. cargo-dist also attaches a plain `source.tar.gz` |
 

@@ -58,35 +58,10 @@ out=$dist/$name
 # the same commit gives the same tarball bytes.
 epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct HEAD)}
 
-# repro_tar ARCHIVE DIR PATH...: a gzipped tar of the PATHs under DIR that
-# depends only on their contents. Plain `tar -czf` records the builder's
-# user and group names and ids, every file's local mtime, macOS extended
-# attributes and readdir order, and gzip records the time; a published
-# archive would then name the builder and change hash with every build.
-# Here entries are sorted, owned by root:root (0:0), stamped $epoch, and
-# gzip gets -n. This sets the mtimes of the files themselves, so DIR must
-# be a copy this script owns. bsdtar (macOS) and GNU tar spell it
-# differently.
-repro_tar() {
-    local archive=$1 dir=$2
-    shift 2
-    local list
-    list=$(mktemp)
-    (cd "$dir" && find "$@" -print | LC_ALL=C sort) >"$list"
-    (cd "$dir" && node -e '
-        const fs = require("fs");
-        const t = Number(process.argv[1]);
-        for (const f of fs.readFileSync(0, "utf8").split("\n").filter(Boolean)) fs.lutimesSync(f, t, t);
-    ' "$epoch" <"$list")
-    if tar --version 2>/dev/null | grep -q 'GNU tar'; then
-        (cd "$dir" && tar --no-recursion --format=ustar --owner=root:0 --group=root:0 \
-            --mtime="@$epoch" -cf - -T "$list")
-    else
-        (cd "$dir" && COPYFILE_DISABLE=1 tar --no-recursion --format ustar --uid 0 --gid 0 \
-            --uname root --gname root --no-xattrs --no-acls --no-fflags -cf - -T "$list")
-    fi | gzip -n -9 >"$archive"
-    rm -f "$list"
-}
+# repro_tar, the fonts and BOSL2 archives, the licence notices and the
+# local-path scan, shared with the npm package (build-package.sh).
+# shellcheck source=scripts/web/common.sh
+source "$root/scripts/web/common.sh"
 
 if [ -f "$HOME/.cargo/env" ] && ! command -v cargo >/dev/null 2>&1; then
     # shellcheck disable=SC1091
@@ -97,12 +72,8 @@ core=${NEOSCAD_WEB_CORE:-$root/dist/web-core}
 view=${NEOSCAD_WEB_VIEW:-$root/dist/web-view/webgpu}
 view_webgl=${NEOSCAD_WEB_VIEW_WEBGL:-$root/dist/web-view/webgl}
 
-# BOSL2: the reference checkout, which is gitignored and so lives only in
-# the main checkout; a worktree finds it through the shared git directory.
-bosl2=""
-for dir in "$root/.reference/BOSL2" "$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/.reference/BOSL2"; do
-    if [ -f "$dir/std.scad" ]; then bosl2=$dir; break; fi
-done
+# BOSL2: the reference checkout (common.sh, find_bosl2).
+bosl2=$(find_bosl2)
 
 npm_ci() {
     local dir=$1
@@ -135,14 +106,9 @@ if [ "$engine" = wasm ]; then
     # package.json only lets node import the glue (crates/web/test); the
     # browser needs the module, its glue and the worker.
     cp "$core/worker.js" "$core/neoscad_web.js" "$core/neoscad_web_bg.wasm" "$out/core/"
-    # The fonts are not compiled into the core (crates/web, FONT_DIR): the
-    # page adds them when a model first draws text. Their paths under
-    # assets/fonts are kept, so the worker scans them in the order the
-    # native builds index them (the last tie-break in font matching).
-    fonts_stage=$(mktemp -d)
-    cp -R "$root/assets/fonts/." "$fonts_stage/"
-    repro_tar "$out/fonts.tar.gz" "$fonts_stage" Liberation-2.00.1
-    rm -rf "$fonts_stage"
+    # The fonts are not compiled into the core: the page adds them when a
+    # model first draws text (common.sh, fonts_tar).
+    fonts_tar "$out/fonts.tar.gz"
 fi
 if [ "$viewer" = wasm ]; then
     mkdir "$out/view" "$out/view-webgl"
@@ -151,63 +117,22 @@ if [ "$viewer" = wasm ]; then
 fi
 
 if [ -n "$bosl2" ]; then
-    # Only the library: its .scad files and licence, not its docs, tests
-    # or images. Copied first, because repro_tar stamps the files it packs
-    # and the reference checkout is not ours to touch.
-    bosl2_stage=$(mktemp -d)
-    mkdir "$bosl2_stage/BOSL2"
-    cp "$bosl2/LICENSE" "$bosl2"/*.scad "$bosl2_stage/BOSL2/"
-    repro_tar "$out/bosl2.tar.gz" "$bosl2_stage" BOSL2
-    rm -rf "$bosl2_stage"
+    bosl2_tar "$out/bosl2.tar.gz" "$bosl2"
 else
     echo "warning: no .reference/BOSL2, so bosl2.tar.gz is missing and the BOSL2 examples will fail" >&2
 fi
 
 # --- Licences ------------------------------------------------------------
+bosl2_shipped=""
+if [ -f "$out/bosl2.tar.gz" ]; then bosl2_shipped=$bosl2; fi
 {
-    echo "Third-party software in this NeoSCAD web bundle"
-    echo "================================================"
-    echo
-    echo "NeoSCAD itself is GPL-2.0-or-later; see SOURCE.txt for its source."
-    echo
-    echo "The front end bundles these npm packages (app.js):"
-    echo
-    cat "$out/THIRD-PARTY-LICENSES-web.txt"
-    if [ "$engine" = wasm ] || [ "$viewer" = wasm ]; then
-        echo
-        echo "------------------------------------------------------------------------"
-        echo "The engine (core/) and the viewer (view/, view-webgl/) are compiled from"
-        echo "NeoSCAD's Rust source and these crates:"
-        echo
-        cargo metadata --format-version 1 --locked --filter-platform wasm32-unknown-unknown |
-            node "$root/scripts/web/rust-licenses.mjs" neoscad-web neoscad-web-view
-        echo
-        echo "------------------------------------------------------------------------"
-        echo "NeoSCAD's NOTICE (code ported from other projects):"
-        echo
-        cat "$root/NOTICE"
-    fi
-    if [ "$engine" = wasm ]; then
-        echo
-        echo "------------------------------------------------------------------------"
-        echo "fonts.tar.gz is the Liberation fonts 2.00.1 (SIL Open Font License 1.1):"
-        echo
-        cat "$root/assets/fonts/Liberation-2.00.1/LICENSE"
-        echo
-        echo "------------------------------------------------------------------------"
-        echo "The engine embeds the MCAD library (GNU LGPL 2.1; some files allow more"
-        echo "permissive terms, as their comments say) and OpenSCAD's colour schemes"
-        echo "(GNU GPL 2 or later). See assets/README.md in the source."
-        echo
-        cat "$root/assets/libraries/MCAD/lgpl-2.1.txt"
-    fi
-    if [ -f "$out/bosl2.tar.gz" ]; then
-        echo
-        echo "------------------------------------------------------------------------"
-        echo "bosl2.tar.gz is BOSL2 (https://github.com/BelfrySCAD/BOSL2):"
-        echo
-        cat "$bosl2/LICENSE"
-    fi
+    tp_title="Third-party software in this NeoSCAD web bundle" \
+        tp_rule="================================================" \
+        tp_license="NeoSCAD itself is GPL-2.0-or-later; see SOURCE.txt for its source." \
+        tp_npm_intro="The front end bundles these npm packages (app.js):" \
+        tp_npm_file="$out/THIRD-PARTY-LICENSES-web.txt" tp_prefix="" \
+        tp_engine="$engine" tp_viewer="$viewer" tp_bosl2="$bosl2_shipped" \
+        third_party_licenses
     echo
     echo "------------------------------------------------------------------------"
     echo "examples/: the OpenSCAD examples (CSG, sign, GEB, example024) are"
@@ -237,12 +162,8 @@ EOF
 
 # --- No local paths ---------------------------------------------------------
 # The bundle is published: nothing in it may name the builder's home
-# directory (scripts/web/remap-paths.sh maps the paths rustc writes).
-if leaks=$(LC_ALL=C grep -rlaF "$HOME/" "$out"); then
-    echo "error: the bundle contains local paths ($HOME/...):" >&2
-    echo "$leaks" | sed "s|^$out/|  |" >&2
-    exit 1
-fi
+# directory (common.sh, no_local_paths).
+no_local_paths "$out" "the bundle" || exit 1
 
 # --- Archives and checksums ------------------------------------------------
 git archive --format=tar.gz --prefix="$name-source/" -o "$dist/$name-source.tar.gz" HEAD
