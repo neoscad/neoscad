@@ -15,18 +15,34 @@ export function workerURL(engine, base = import.meta.url) {
   return new URL(engine === "wasm" ? "./core/worker.js" : "./mock-worker.js", base);
 }
 
-export function createEngine(build, base = import.meta.url) {
+/// The engine client for a build. `options` are for hosts other than the
+/// demo page (the npm package, web/package); each defaults to what the
+/// page has always done:
+///
+///   seed       unseeded `rands()`'s seed (default: one per page load)
+///   limits     the worker's ResourceLimits (default: the worker's own)
+///   spawn      makes the worker (default: a module worker at workerURL);
+///              it must return a new worker on every call, because the
+///              client respawns after a crash or a cancel
+///   lazyFonts  whether ensureFonts fetches fonts.tar.gz (default: only
+///              for the wasm core; the mock draws no text)
+///   staleMs    how long a run may block a newer one (EngineClient)
+export function createEngine(build, base = import.meta.url, options = {}) {
   const url = workerURL(build.engine, base);
-  const engine = new EngineClient({
-    spawn: () => new Worker(url, { type: "module", name: "neoscad-engine" }),
+  const {
     // One seed per page load, kept across respawns: unseeded rands()
     // differ between visits, as between app launches, but a respawn does
     // not change the model on screen.
-    seed: Date.now() >>> 0,
-  });
-  // The wasm core's fonts are fetched on first use (FONTS); the mock draws
-  // no text, and the mock build has no fonts.tar.gz.
-  engine.lazyFonts = build.engine === "wasm";
+    seed = Date.now() >>> 0,
+    limits = null,
+    spawn = () => new Worker(url, { type: "module", name: "neoscad-engine" }),
+    // The wasm core's fonts are fetched on first use (FONTS); the mock
+    // draws no text, and the mock build has no fonts.tar.gz.
+    lazyFonts = build.engine === "wasm",
+    staleMs,
+  } = options;
+  const engine = new EngineClient({ spawn, seed, limits, ...(staleMs === undefined ? {} : { staleMs }) });
+  engine.lazyFonts = lazyFonts;
   return engine;
 }
 

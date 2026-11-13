@@ -474,8 +474,9 @@ The page owns the worker's life:
   a failed allocation, or "the engine's stack overflowed" for V8's
   `RangeError`); the instance is unusable after that. The page terminates it and respawns.
 - **Respawn** ("engine restarted"): the new worker starts empty. The page
-  replays, in order: `init` (same `limits` and `seed`), every `addFiles`
-  (from its kept copies), `open` of each document with its current text,
+  replays, in order: `init` (same `limits` and `seed`), its `addFiles`
+  (from its kept copies: the latest copy of each path and of each lazy
+  library, `web/src/engine/client.js`), `open` of each document with its current text,
   and the language client's `initialize`, `initialized` and `didOpen`
   (or it restarts the client). Measurement handles do not survive; a
   pending `run` is sent again.

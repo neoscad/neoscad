@@ -213,3 +213,36 @@ test("the page's language extensions go with every language-server message, and 
   assert.ok(replayed.length > 0);
   for (const m of replayed) assert.deepEqual(m.enable, ["sketch", "fillet"]);
 });
+
+test("limits go with init and its replay; the replay keeps the latest copy of each file", async () => {
+  const workers = [];
+  const limits = { timeSeconds: 5, memoryBytes: 1 << 28 };
+  const c = new EngineClient({
+    spawn: () => {
+      const w = new FakeWorker();
+      workers.push(w);
+      return w;
+    },
+    seed: 7,
+    limits,
+  });
+  await c.start();
+  assert.deepEqual(workers[0].received[0], { id: 1, type: "init", seed: 7, limits });
+  // A host that re-sends a changed include at every edit (web/package):
+  // without the dedup the replay would hold every copy.
+  for (let i = 0; i < 5; i++) {
+    await c.addFiles({ files: [{ path: "/doc/m1/part.scad", data: `cube(${i});` }, { path: `/doc/m1/f${i}.scad`, data: "" }] });
+  }
+  await c.addFiles({ tar: new ArrayBuffer(512), root: "/neoscad/libraries" }, "BOSL2");
+  await c.addFiles({ tar: new ArrayBuffer(512), root: "/neoscad/libraries" }, "BOSL2");
+  assert.equal(c.fileRequests.length, 6, "five requests still own a file, and one archive");
+  const files = c.fileRequests.flatMap((r) => r.request.files.map((f) => `${f.path}=${f.data}`));
+  assert.deepEqual(files.filter((f) => f.startsWith("/doc/m1/part")), ["/doc/m1/part.scad=cube(4);"]);
+  await c.open(path, "cube(0);");
+  await c.update(path, "cube(1);");
+  await c.restart("test");
+  const replayed = workers[1].received;
+  assert.deepEqual(replayed[0].limits, limits);
+  assert.equal(replayed.filter((m) => m.type === "addFiles").length, 6);
+  assert.ok(replayed.some((m) => m.type === "open" && m.path === path && m.text === "cube(1);"));
+});

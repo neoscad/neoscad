@@ -1,0 +1,34 @@
+------------------------------------------------------------------------
+
+Classpath Exception 2.0
+
+The @neoscad/viewer package is licensed under the GNU General Public
+License, version 2 or (at your option) any later version, above, with
+the following exception (SPDX: GPL-2.0-or-later WITH
+Classpath-exception-2.0).
+
+Scope: the exception covers the NeoSCAD code shipped in this package,
+that is its JavaScript and the NeoSCAD-authored code compiled into its
+WebAssembly modules. "This library" below means that code. Third-party
+components in the package keep their own licences, which
+THIRD-PARTY-LICENSES.txt lists: among them MCAD (LGPL-2.1), the
+Liberation fonts (OFL-1.1), BOSL2 (BSD-2-Clause), Manifold (Apache-2.0),
+Clipper2 (BSL-1.0), libtess2 (SGI Free Software License B), and the
+Rust and npm dependencies listed there.
+
+Linking this library statically or dynamically with other modules is
+making a combined work based on this library. Thus, the terms and
+conditions of the GNU General Public License cover the whole
+combination.
+
+As a special exception, the copyright holders of this library give you
+permission to link this library with independent modules to produce an
+executable, regardless of the license terms of these independent
+modules, and to copy and distribute the resulting executable under
+terms of your choice, provided that you also meet, for each linked
+independent module, the terms and conditions of the license of that
+module. An independent module is a module which is not derived from
+or based on this library. If you modify this library, you may extend
+this exception to your version of the library, but you are not
+obligated to do so. If you do not wish to do so, delete this
+exception statement from your version.

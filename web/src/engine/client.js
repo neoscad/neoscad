@@ -48,10 +48,13 @@ export class EngineClient {
   /// addEventListener for "message" and "error"). `seed` is the seed of
   /// unseeded `rands()`, the same for every worker this client starts.
   /// `timers` defaults to the global ones; the tests pass their own.
-  constructor({ spawn, staleMs = 3000, seed = 0, now = () => performance.now(), timers = globalThis } = {}) {
+  /// `limits` (a ResourceLimits, or null for the worker's defaults) go
+  /// with every `init`, the replayed ones too.
+  constructor({ spawn, staleMs = 3000, seed = 0, limits = null, now = () => performance.now(), timers = globalThis } = {}) {
     this.spawn = spawn;
     this.staleMs = staleMs;
     this.seed = seed >>> 0;
+    this.limits = limits;
     this.now = now;
     this.timers = timers;
     this.listeners = new Map();
@@ -59,7 +62,7 @@ export class EngineClient {
     this.nextId = 1;
     this.pending = new Map(); // id -> {resolve, reject, quiet}
     this.documents = new Map(); // path -> text, replayed on respawn
-    this.fileRequests = []; // addFiles requests, replayed on respawn
+    this.fileRequests = []; // {request, library}: addFiles, replayed on respawn
     this.libraries = new Set(); // names of the lazy libraries added
     this.lspInit = []; // the language client's initialize and initialized
     this.lspDocs = new Map(); // uri -> {languageId, version, text}
@@ -113,10 +116,10 @@ export class EngineClient {
     });
     // The worker queues requests that arrive while its module loads, so
     // `init` goes now rather than after `ready`.
-    const ready = this.send(Requests.init(this.seed)).then(async (info) => {
+    const ready = this.send(Requests.init(this.seed, this.limits)).then(async (info) => {
       this.info = info;
       this.defaults ??= await this.send(Requests.defaults());
-      for (const r of this.fileRequests) await this.send(r);
+      for (const { request } of this.fileRequests) await this.send(request);
       for (const [path, text] of this.documents) await this.send(Requests.open(path, text));
       // Only a new worker's server needs the language client's setup
       // replayed: on the first start the client's own messages are still
@@ -238,6 +241,12 @@ export class EngineClient {
     return this.request(Requests.edit(path, wire));
   }
 
+  /// Replace the whole text of an open document.
+  update(path, text) {
+    this.documents.set(path, text);
+    return this.request(Requests.update(path, text));
+  }
+
   close(path) {
     if (!this.documents.delete(path)) return Promise.resolve({ closed: false });
     return this.request(Requests.close(path)).catch(() => ({ closed: false }));
@@ -246,9 +255,23 @@ export class EngineClient {
   /// Files or an archive copied into the worker's memory (not
   /// transferred: the client keeps its copy to give a respawned worker).
   /// `library` names the lazy library the request adds, if it is one.
+  ///
+  /// Only the latest copy of each file is kept for the replay: a host that
+  /// sends a changed include at every edit (the npm package's `files`)
+  /// would otherwise grow the replay, and the memory it holds, without
+  /// bound. A library's archive replaces an earlier one of the same name.
   addFiles(request, library = null) {
     const r = Requests.addFiles(request);
-    this.fileRequests.push(r);
+    const paths = new Set(r.files.map((f) => f.path));
+    const kept = [];
+    for (const old of this.fileRequests) {
+      if (library && old.library === library) continue;
+      const files = old.request.files.filter((f) => !paths.has(f.path));
+      if (files.length === old.request.files.length) kept.push(old);
+      else if (files.length || old.request.tar) kept.push({ ...old, request: { ...old.request, files } });
+    }
+    kept.push({ request: r, library });
+    this.fileRequests = kept;
     if (library) this.libraries.add(library);
     return this.request(r);
   }

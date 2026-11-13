@@ -2130,6 +2130,32 @@ lead them, come roughly in order of user impact.
   collaborative extensions do) would refuse less, at the cost of edits
   the agent did not see.
 
+## npm package
+Deferred from the first version of `@neoscad/viewer` (`docs/js-package.md`):
+- **Node and server-side rendering.** The engine needs `Worker`, and the
+  viewer needs a GPU canvas. A node entry could drive the core's
+  `worker.js` `start`/`handle` directly, as `crates/web/test/run.mjs`
+  does, for exports and checks with no view.
+- **A React wrapper** (and Vue's). The custom element works in both, but
+  a thin component with typed props and refs would be friendlier.
+- **A measurement API** (`measure`, `section`, `between`, `pick` are on
+  the wire already) and the customizer UI. The package exposes only
+  `parameters`.
+- **A WebGL-only or WebGPU-only slim build.** Every install carries both
+  viewers (3.6 MB). A page that knows its audience could drop one, and a
+  `core`-only package could serve export-only users.
+- **Files are never removed.** A model's `files` stay in the worker's
+  memory (and the client's replay) after a later run drops them or the
+  model is disposed: the protocol has no delete. A `removeFiles` request,
+  or forgetting a disposed model's paths in the client's replay, would
+  bound that.
+- **The shared engine lives as long as the page.** Elements removed for
+  good leave the worker running. Ref-counting with an idle timeout
+  would free it without respawning when an element is only moved.
+- **jsDelivr/unpkg behaviour** (CORS and `application/wasm`) was checked
+  in the plan's review, not by this build's tests, which use a local
+  second origin. Check it again after the first publish.
+
 ## Windows
 - winget: microsoft/winget-pkgs#443995 (New package, NeoSCAD.NeoSCAD
   0.4.2) is left at 0.4.2 while it waits for review (owner, 2026-10-08).
